@@ -1,0 +1,42 @@
+#pragma once
+
+//#pragma warning(disable : 4201)
+
+#include <windef.h>
+
+#define VIOGPU_D3D_MAGIC        0x476F6956 // 'VioG'
+#define VIOGPU_D3D_VERSION      0x1
+
+typedef enum _VIOGPU_STANDARDALLOCATION_TYPE {
+    VIOGPU_USERALLOCATION_TYPE       = 0,
+    VIOGPU_SHAREDPRIMARYSURFACE_TYPE = 1,
+    VIOGPU_SHADOWSURFACE_TYPE        = 2,
+    VIOGPU_STAGINGSURFACE_TYPE       = 3
+} VIOGPU_STANDARDALLOCATION_TYPE;
+
+
+typedef struct _VIOGPU_PRIVATEDATA {
+    ULONG Magic;
+    ULONG Version;
+    USHORT VendorId;
+    USHORT DeviceId;
+    GUID AdapterGuid;
+} VIOGPU_PRIVATEDATA, *PVIOGPU_PRIVATEDATA;
+
+
+typedef struct _VIOGPU_SURFACE_DESC {
+    ULONG XResolution;
+    ULONG YResolution;
+    ULONG BytesPerPixel;
+    ULONG Stride;
+    D3DDDIFORMAT Format;
+    D3DDDI_RATIONAL RefreshRate;
+} VIOGPU_SURFACE_DESC, *PVIOGPU_SURFACE_DESC;
+
+typedef struct _VIOGPU_D3D_ALLOCATION {
+    VIOGPU_STANDARDALLOCATION_TYPE Type;
+    BOOLEAN Primary;
+    D3DDDI_VIDEO_PRESENT_SOURCE_ID VidPnSourceId;
+    VIOGPU_SURFACE_DESC SurfaceDesc;
+} VIOGPU_D3D_ALLOCATION, *PVIOGPU_D3D_ALLOCATION;
+
