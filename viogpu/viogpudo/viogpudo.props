@@ -14,6 +14,11 @@ Enabling and customizing virtio build features
     <Feature_AdjustInfLegacy>true</Feature_AdjustInfLegacy>
     <Feature_AdjustInf>true</Feature_AdjustInf>
     <!-- $(SourceInfFile) is already defined in .vcxproj -->
+    <SourceInfFile>viogpudo.inx</SourceInfFile>
     <CopyrightStrings>VioGpuDodCopyrightStrings</CopyrightStrings>
   </PropertyGroup>
+
+  <ItemGroup>
+    <PackOne_UnsupportedOS Include="@(PackOne_UnsupportedOS);Wxp;Wnet;Wlh;Win8.1" />
+  </ItemGroup>
 </Project>
