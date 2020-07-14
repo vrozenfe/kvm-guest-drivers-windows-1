@@ -321,7 +321,7 @@ void CPciBar::Unmap(PDXGKRNL_INTERFACE pDxgkInterface)
     {
         if (!m_bIoMapped)
         {
-            pDxgkInterface->DxgkCbUnmapMemory( pDxgkInterface->DeviceHandle, &m_BaseVA);
+            pDxgkInterface->DxgkCbUnmapMemory( pDxgkInterface->DeviceHandle, m_BaseVA);
         }
     }
     m_BaseVA = nullptr; 
@@ -500,6 +500,8 @@ MapFrameBuffer(
         }
     }
 
+    DbgPrint(TRACE_LEVEL_FATAL, ("%s PhysicalAddress.QuadPart (0x%I64x), Length (%lu), VirtualAddress (%p)\n",
+                    __FUNCTION__, PhysicalAddress.QuadPart, Length, VirtualAddress));
     return STATUS_SUCCESS;
 }
 
@@ -510,6 +512,8 @@ UnmapFrameBuffer(
 {
     PAGED_CODE();
 
+    DbgPrint(TRACE_LEVEL_FATAL, ("%s Length (%lu), VirtualAddress (%p)\n",
+                    __FUNCTION__, Length, VirtualAddress));
     if ((VirtualAddress == NULL) && (Length == 0))
     {
         // Allow this function to be called when there's no work to do, and treat as successful
