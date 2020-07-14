@@ -44,7 +44,7 @@ DriverEntry(
     _In_  UNICODE_STRING* pRegistryPath)
 {
     PAGED_CODE();
-    VioGpuDbgBreak();
+//    VioGpuDbgBreak();
 
     InitializeDebugPrints(pDriverObject, pRegistryPath);
     DbgPrint(TRACE_LEVEL_FATAL, ("---> KMDOD build on on %s %s\n", __DATE__, __TIME__));

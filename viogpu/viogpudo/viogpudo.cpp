@@ -422,7 +422,7 @@ NTSTATUS VioGpuDod::QueryAdapterInfo(_In_ CONST DXGKARG_QUERYADAPTERINFO* pQuery
             pDriverCaps->WDDMVersion = DXGKDDI_WDDMv1_3;
 #endif
             pDriverCaps->HighestAcceptableAddress.QuadPart = (ULONG64)-1;
-            VioGpuDbgBreak();
+//            VioGpuDbgBreak();
 
             if (m_pHWDevice->EnablePointer()) {
                 pDriverCaps->MaxPointerWidth  = POINTER_SIZE;
@@ -2627,7 +2627,7 @@ NTSTATUS VioGpuAdapter::HWInit(PCM_RESOURCE_LIST pResList, DXGK_DISPLAY_INFORMAT
     NTSTATUS status = STATUS_SUCCESS;
     HANDLE   threadHandle = 0;
     DbgPrint(TRACE_LEVEL_INFORMATION, ("---> %s\n", __FUNCTION__));
-    VioGpuDbgBreak();
+//    VioGpuDbgBreak();
     struct virtqueue *vqs[2];
     UINT size = 0;
     do
