@@ -84,6 +84,26 @@ extern "C"
 #define _Function_class_(x)
 #endif
 
+typedef struct _tagRunTimeNdisVersion
+{
+    UCHAR major;
+    UCHAR minor;
+}tRunTimeNdisVersion;
+
+extern const tRunTimeNdisVersion& ParandisVersion;
+
+/* true if NDIS version is at least major.minor */
+static bool FORCEINLINE CheckNdisVersion(UCHAR major, UCHAR minor)
+{
+    if (ParandisVersion.major == major)
+    {
+        return ParandisVersion.minor >= minor;
+    }
+    return ParandisVersion.major > major;
+}
+
+typedef struct _tagPARANDIS_ADAPTER PARANDIS_ADAPTER;
+
 #include "ParaNdis-SM.h"
 #include "ParaNdis-RSS.h"
 
@@ -162,7 +182,7 @@ struct CPUPathBundle : public CPlacementAllocatable {
 
 #define PARANDIS_MULTICAST_LIST_SIZE        32
 #define PARANDIS_MEMORY_TAG                 '5muQ'
-#define PARANDIS_DEFAULT_LINK_SPEED         100000000000  // 100Gbps link speed
+#define PARANDIS_DEFAULT_LINK_SPEED         10000000000  // 10Gbps link speed
 #define PARANDIS_MIN_LSO_SEGMENTS           2
 // reported
 #define PARANDIS_MAX_LSO_SIZE               0xF800
@@ -362,6 +382,7 @@ typedef struct _tagPARANDIS_ADAPTER
     NDIS_HANDLE             MiniportHandle;
     NDIS_HANDLE             InterruptHandle;
     NDIS_HANDLE             BufferListsPool;
+    NDIS_HANDLE             BufferListsPoolForArm;
 
     CPciResources           PciResources;
     VirtIODevice            IODevice;
@@ -375,6 +396,7 @@ typedef struct _tagPARANDIS_ADAPTER
     u64                     u64GuestFeatures;
     BOOLEAN                 bConnected;
     BOOLEAN                 bGuestAnnounced;
+    NDIS_PHYSICAL_MEDIUM    physicalMediaType;
     NDIS_MEDIA_CONNECT_STATE fCurrentLinkState;
     BOOLEAN                 bEnableInterruptHandlingDPC;
     BOOLEAN                 bDoSupportPriority;
@@ -430,6 +452,10 @@ typedef struct _tagPARANDIS_ADAPTER
         ULONG framesFilteredOut;
         ULONG framesCoalescedHost;
         ULONG framesCoalescedWindows;
+        ULONG framesRSSHits;
+        ULONG framesRSSMisses;
+        ULONG framesRSSUnclassified;
+        ULONG framesRSSError;
     } extraStatistics;
 
     /* initial number of free Tx descriptor(from cfg) - max number of available Tx descriptors */
@@ -469,6 +495,9 @@ typedef struct _tagPARANDIS_ADAPTER
     BOOLEAN                     bOffloadv4Enabled;
     BOOLEAN                     bOffloadv6Enabled;
     BOOLEAN                     bDeviceInitialized;
+    BOOLEAN                     bRSSSupportedByDevice;
+    BOOLEAN                     bRSSSupportedByDevicePersistent;
+    BOOLEAN                     bHashReportedByDevice;
 
 #if PARANDIS_SUPPORT_RSS
     BOOLEAN                     bRSSOffloadSupported;
@@ -476,6 +505,12 @@ typedef struct _tagPARANDIS_ADAPTER
     NDIS_RECEIVE_SCALE_CAPABILITIES RSSCapabilities;
     PARANDIS_RSS_PARAMS         RSSParameters;
     CCHAR                       RSSMaxQueuesNumber;
+    struct
+    {
+        ULONG                   SupportedHashes;
+        USHORT                  MaxIndirectEntries;
+        UCHAR                   MaxKeySize;
+    } DeviceRSSCapabilities;
 #endif
 
 #if PARANDIS_SUPPORT_RSC
@@ -537,11 +572,6 @@ void ParaNdis_CXDPCWorkBody(PARANDIS_ADAPTER *pContext);
 
 void ParaNdis_ReuseRxNBLs(PNET_BUFFER_LIST pNBL);
 
-#ifdef PARANDIS_SUPPORT_RSS
-VOID ParaNdis_ResetRxClassification(
-    PARANDIS_ADAPTER *pContext);
-#endif
-
 NDIS_STATUS ParaNdis_SetMulticastList(
     PARANDIS_ADAPTER *pContext,
     PVOID Buffer,
@@ -557,72 +587,20 @@ VOID ParaNdis_VirtIODisableIrqSynchronized(
     PARANDIS_ADAPTER *pContext,
     ULONG interruptSource);
 
-void ParaNdis_FreeRxBufferDescriptor(
-    PARANDIS_ADAPTER *pContext,
-    pRxNetDescriptor p);
-
-BOOLEAN ParaNdis_PerformPacketAnalysis(
-#if PARANDIS_SUPPORT_RSS
-    PPARANDIS_RSS_PARAMS RSSParameters,
-#endif
-    PNET_PACKET_INFO PacketInfo,
-    PVOID HeadersBuffer,
-    ULONG DataLength);
-
-CCHAR ParaNdis_GetScalingDataForPacket(
-    PARANDIS_ADAPTER *pContext,
-    PNET_PACKET_INFO pPacketInfo,
-    PPROCESSOR_NUMBER pTargetProcessor);
-
-#if PARANDIS_SUPPORT_RSS
-NDIS_STATUS ParaNdis_SetupRSSQueueMap(PARANDIS_ADAPTER *pContext);
-#endif
-
-VOID ParaNdis_ReceiveQueueAddBuffer(
-    PPARANDIS_RECEIVE_QUEUE pQueue,
-    pRxNetDescriptor pBuffer);
-
-VOID ParaNdis_ProcessorNumberToGroupAffinity(
+static __inline VOID ParaNdis_ProcessorNumberToGroupAffinity(
     PGROUP_AFFINITY Affinity,
-    const PPROCESSOR_NUMBER Processor);
-
-VOID ParaNdis_QueueRSSDpc(
-    PARANDIS_ADAPTER *pContext,
-    PGROUP_AFFINITY pTargetAffinity);
-
-
-
-
-
+    const PPROCESSOR_NUMBER Processor)
+{
+    Affinity->Group = Processor->Group;
+    Affinity->Mask = 1;
+    Affinity->Mask <<= Processor->Number;
+}
 
 static __inline BOOLEAN
 ParaNDIS_IsQueueInterruptEnabled(struct virtqueue * _vq)
 {
     return virtqueue_is_interrupt_enabled(_vq);
 }
-
-
-void ParaNdis_FreeRxBufferDescriptor(
-    PARANDIS_ADAPTER *pContext,
-    pRxNetDescriptor p);
-
-CCHAR ParaNdis_GetScalingDataForPacket(
-    PARANDIS_ADAPTER *pContext,
-    PNET_PACKET_INFO pPacketInfo,
-    PPROCESSOR_NUMBER pTargetProcessor);
-
-VOID ParaNdis_ReceiveQueueAddBuffer(
-    PPARANDIS_RECEIVE_QUEUE pQueue,
-    pRxNetDescriptor pBuffer);
-
-VOID ParaNdis_ProcessorNumberToGroupAffinity(
-    PGROUP_AFFINITY Affinity,
-    const PPROCESSOR_NUMBER Processor);
-
-VOID ParaNdis_QueueRSSDpc(
-    PARANDIS_ADAPTER *pContext,
-    ULONG MessageIndex,
-    PGROUP_AFFINITY pTargetAffinity);
 
 VOID ParaNdis_OnPnPEvent(
     PARANDIS_ADAPTER *pContext,
@@ -650,12 +628,8 @@ VOID ParaNdis_PowerOff(
     PARANDIS_ADAPTER *pContext
 );
 
-#if PARANDIS_SUPPORT_RSC
-VOID ParaNdis_UpdateGuestOffloads(
-    PARANDIS_ADAPTER *pContext,
-    UINT64 Offloads
-);
-#endif
+void ParaNdis_DeviceConfigureRSC(PARANDIS_ADAPTER *pContext);
+
 void ParaNdis_ResetOffloadSettings(PARANDIS_ADAPTER *pContext, tOffloadSettingsFlags *pDest, PULONG from);
 
 tChecksumCheckResult ParaNdis_CheckRxChecksum(
@@ -721,13 +695,6 @@ BOOLEAN ParaNdis_InitialAllocatePhysicalMemory(
 VOID ParaNdis_FreePhysicalMemory(
     PARANDIS_ADAPTER *pContext,
     tCompletePhysicalAddress *pAddresses);
-
-BOOLEAN ParaNdis_BindRxBufferToPacket(
-    PARANDIS_ADAPTER *pContext,
-    pRxNetDescriptor p);
-
-void ParaNdis_UnbindRxBufferFromPacket(
-    pRxNetDescriptor p);
 
 void ParaNdis_RestoreDeviceConfigurationAfterReset(
     PARANDIS_ADAPTER *pContext);
@@ -858,6 +825,8 @@ ULONG ParaNdis_StripVlanHeaderMoveHead(PNET_PACKET_INFO packetInfo);
 VOID ParaNdis_PadPacketToMinimalLength(PNET_PACKET_INFO packetInfo);
 BOOLEAN ParaNdis_IsSendPossible(PARANDIS_ADAPTER *pContext);
 NDIS_STATUS ParaNdis_ExactSendFailureStatus(PARANDIS_ADAPTER *pContext);
+
+VOID ParaNdis_PropagateOid(PARANDIS_ADAPTER *pContext, NDIS_OID oid, PVOID buffer, UINT length);
 
 void ParaNdis_PrintIndirectionTable(const NDIS_RECEIVE_SCALE_PARAMETERS* Params);
 #endif

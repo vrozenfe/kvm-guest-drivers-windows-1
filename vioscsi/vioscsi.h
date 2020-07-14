@@ -46,13 +46,16 @@ typedef struct VirtIOBufferDescriptor VIO_SG, *PVIO_SG;
 #define VIRTIO_SCSI_SENSE_SIZE 96
 
 #define MAX_PHYS_SEGMENTS       64
-
+#define MAX_PHYS_INDIRECT_SEGMENTS 256
 #define VIOSCSI_POOL_TAG        'SoiV'
 #define VIRTIO_MAX_SG            (3+MAX_PHYS_SEGMENTS)
 
 #define SECTOR_SIZE             512
 #define IO_PORT_LENGTH          0x40
 #define MAX_CPU                 256
+
+#define MAX_PH_BREAKS           "PhysicalBreaks"
+
 
 /* Feature Bits */
 #define VIRTIO_SCSI_F_INOUT                    0
@@ -228,7 +231,7 @@ typedef struct _VRING_DESC_ALIAS
         ULONGLONG data[2];
         UCHAR chars[SIZE_OF_SINGLE_INDIRECT_DESC];
     }u;
-}VRING_DESC_ALIAS;
+}VRING_DESC_ALIAS, *PVRING_DESC_ALIAS;
 
 #pragma pack(1)
 typedef struct _SRB_EXTENSION {
@@ -238,9 +241,12 @@ typedef struct _SRB_EXTENSION {
     ULONG                 in;
     ULONG                 Xfer;
     VirtIOSCSICmd         cmd;
-    VIO_SG                sg[128];
-    VRING_DESC_ALIAS      desc[VIRTIO_MAX_SG];
     ULONG                 vq_num;
+    ULONG                 allocated;
+    PVIO_SG               psgl;
+    PVRING_DESC_ALIAS     pdesc;
+    VIO_SG                vio_sg[VIRTIO_MAX_SG];
+    VRING_DESC_ALIAS      desc_alias[VIRTIO_MAX_SG];
 #ifdef USE_CPU_TO_VQ_MAP
     ULONG                 cpu;
 #endif // USE_CPU_TO_VQ_MAP
@@ -286,6 +292,7 @@ typedef struct _ADAPTER_EXTENSION {
     };
     VIRTIO_BAR            pci_bars[PCI_TYPE0_ADDRESSES];
     ULONG                 system_io_bus_number;
+    ULONG                 slot_number;
 
     ULONG                 queue_depth;
     BOOLEAN               dump_mode;
@@ -311,7 +318,7 @@ typedef struct _ADAPTER_EXTENSION {
     PGROUP_AFFINITY       pmsg_affinity;
     BOOLEAN               dpc_ok;
     PSTOR_DPC             dpc;
-
+    ULONG                 max_physical_breaks;
     SCSI_WMILIB_CONTEXT   WmiLibContext;
     ULONGLONG             hba_id;
     PUCHAR                ser_num;

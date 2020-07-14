@@ -38,10 +38,15 @@ typedef struct _tagPARANDIS_SCALING_SETTINGS
     ULONG          CPUIndexMappingSize;
 
     LONG           FirstQueueIndirectionIndex;
+
+    PROCESSOR_NUMBER DefaultProcessor;
+    CCHAR          DefaultQueue;
 } PARANDIS_SCALING_SETTINGS, *PPARANDIS_SCALING_SETTINGS;
 
 typedef struct _tagPARANDIS_RSS_PARAMS
 {
+    PARANDIS_ADAPTER *pContext;
+
     CCHAR             ReceiveQueuesNumber;
 
     PARANDIS_RSS_MODE RSSMode;
@@ -64,22 +69,23 @@ typedef struct _tagRSS_HASH_KEY_PARAMETERS
 
 ULONG ParaNdis6_QueryReceiveHash(const PARANDIS_RSS_PARAMS *RSSParameters, RSS_HASH_KEY_PARAMETERS *RSSHashKeyParameters);
 
-NDIS_STATUS ParaNdis6_RSSSetParameters( PARANDIS_RSS_PARAMS *RSSParameters,
+NDIS_STATUS ParaNdis6_RSSSetParameters( PARANDIS_ADAPTER *pContext,
                                         const NDIS_RECEIVE_SCALE_PARAMETERS* Params,
                                         UINT ParamsLength,
-                                        PUINT ParamsBytesRead,
-                                        NDIS_HANDLE NdisHandle);
+                                        PUINT ParamsBytesRead);
 
-NDIS_STATUS ParaNdis6_RSSSetReceiveHash(PARANDIS_RSS_PARAMS *RSSParameters,
+NDIS_STATUS ParaNdis6_RSSSetReceiveHash(PARANDIS_ADAPTER *pContext,
                                         const NDIS_RECEIVE_HASH_PARAMETERS* Params,
                                         UINT ParamsLength,
                                         PUINT ParamsBytesRead);
 
+void ParaNdis6_CheckDeviceRSSCapabilities(PARANDIS_ADAPTER *pContext, bool& bRss, bool& bHash);
+/* for engineering tests only */
+void ParaNdis6_EnableDeviceRssSupport(PARANDIS_ADAPTER *pContext, BOOLEAN b);
+
 VOID ParaNdis6_RSSCleanupConfiguration(PARANDIS_RSS_PARAMS *RSSParameters);
 
-NDIS_RECEIVE_SCALE_CAPABILITIES* ParaNdis6_RSSCreateConfiguration(PARANDIS_RSS_PARAMS *RSSParameters,
-                                                                  NDIS_RECEIVE_SCALE_CAPABILITIES *RSSCapabilities,
-                                                                  CCHAR RSSMaxQueuesNumber);
+NDIS_RECEIVE_SCALE_CAPABILITIES* ParaNdis6_RSSCreateConfiguration(PARANDIS_ADAPTER *pContext);
 
 struct _tagNET_PACKET_INFO;
 

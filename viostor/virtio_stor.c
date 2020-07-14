@@ -139,6 +139,11 @@ RhelScsiGetCapacity(
     IN OUT PSRB_TYPE Srb
     );
 
+VOID
+RhelSetGuestFeatures(
+    IN PVOID DeviceExtension
+);
+
 UCHAR
 RhelScsiVerify(
     IN PVOID DeviceExtension,
@@ -185,6 +190,12 @@ FORCEINLINE
 CompleteDPC(
     IN PVOID DeviceExtension,
     IN ULONG  MessageID
+    );
+
+VOID
+ReportDeviceIdentifier(
+    IN PVOID DeviceExtension,
+    IN PSRB_TYPE Srb
     );
 
 #ifdef EVENT_TRACING
@@ -357,10 +368,6 @@ VirtIoFindAdapter(
     ConfigInfo->InterruptSynchronizationMode=InterruptSynchronizePerMessage;
 #endif
 
-    ConfigInfo->NumberOfBuses               = 1;
-    ConfigInfo->MaximumNumberOfTargets      = 1;
-    ConfigInfo->MaximumNumberOfLogicalUnits = 1;
-
     pci_cfg_len = StorPortGetBusData(
         DeviceExtension,
         PCIConfiguration,
@@ -450,6 +457,11 @@ VirtIoFindAdapter(
     }
 
     RhelGetDiskGeometry(DeviceExtension);
+    RhelSetGuestFeatures(DeviceExtension);
+
+    ConfigInfo->NumberOfBuses               = 1;
+    ConfigInfo->MaximumNumberOfTargets      = 1;
+    ConfigInfo->MaximumNumberOfLogicalUnits = 1;
 
     ConfigInfo->CachesData = CHECKBIT(adaptExt->features, VIRTIO_BLK_F_FLUSH) ? TRUE : FALSE;
     RhelDbgPrint(TRACE_LEVEL_INFORMATION, " VIRTIO_BLK_F_WCACHE = %d\n", ConfigInfo->CachesData);
@@ -614,24 +626,19 @@ static BOOLEAN InitializeVirtualQueues(PADAPTER_EXTENSION adaptExt)
     return TRUE;
 }
 
-BOOLEAN
-VirtIoHwInitialize(
+VOID
+RhelSetGuestFeatures(
     IN PVOID DeviceExtension
-    )
+)
 {
-    PADAPTER_EXTENSION adaptExt;
-    BOOLEAN            ret = FALSE;
     ULONGLONG          guestFeatures = 0;
-    PERF_CONFIGURATION_DATA perfData = { 0 };
-    ULONG              status = STOR_STATUS_SUCCESS;
-#ifdef MSI_SUPPORTED
-    MESSAGE_INTERRUPT_INFORMATION msi_info = { 0 };
-#endif
-
-    adaptExt = (PADAPTER_EXTENSION)DeviceExtension;
+    PADAPTER_EXTENSION adaptExt = (PADAPTER_EXTENSION)DeviceExtension;
 
     if (CHECKBIT(adaptExt->features, VIRTIO_F_VERSION_1)) {
         guestFeatures |= (1ULL << VIRTIO_F_VERSION_1);
+        if (CHECKBIT(adaptExt->features, VIRTIO_F_RING_PACKED)) {
+            guestFeatures |= (1ULL << VIRTIO_F_RING_PACKED);
+        }
     }
 
 #if (WINVER == 0x0A00)
@@ -694,9 +701,27 @@ VirtIoHwInitialize(
 
     if (!NT_SUCCESS(virtio_set_features(&adaptExt->vdev, guestFeatures))) {
         RhelDbgPrint(TRACE_LEVEL_FATAL, " virtio_set_features failed\n");
-        return FALSE;
+        return;
     }
     RhelDbgPrint(TRACE_LEVEL_VERBOSE, " Host Features %llu gust features %llu\n", adaptExt->features, guestFeatures);
+}
+
+BOOLEAN
+VirtIoHwInitialize(
+    IN PVOID DeviceExtension
+    )
+{
+    PADAPTER_EXTENSION adaptExt;
+    BOOLEAN            ret = FALSE;
+    ULONGLONG          guestFeatures = 0;
+    PERF_CONFIGURATION_DATA perfData = { 0 };
+    ULONG              status = STOR_STATUS_SUCCESS;
+#ifdef MSI_SUPPORTED
+    MESSAGE_INTERRUPT_INFORMATION msi_info = { 0 };
+#endif
+
+    adaptExt = (PADAPTER_EXTENSION)DeviceExtension;
+
 
     adaptExt->msix_vectors = 0;
     adaptExt->pageOffset = 0;
@@ -823,11 +848,6 @@ VirtIoHwInitialize(
         virtio_add_status(&adaptExt->vdev, VIRTIO_CONFIG_S_FAILED);
     }
 
-    if(!adaptExt->dump_mode && !adaptExt->sn_ok)
-    {
-        RhelGetSerialNumber(DeviceExtension);
-    }
-
     return ret;
 }
 
@@ -926,7 +946,9 @@ VirtIoStartIo(
         }
         case SCSIOP_INQUIRY: {
             UCHAR SrbStatus = RhelScsiGetInquiryData(DeviceExtension, (PSRB_TYPE)Srb);
-            CompleteRequestWithStatus(DeviceExtension, (PSRB_TYPE)Srb, SrbStatus);
+            if (SRB_STATUS_PENDING != SrbStatus) {
+                CompleteRequestWithStatus(DeviceExtension, (PSRB_TYPE)Srb, SrbStatus);
+            }
             return TRUE;
         }
 
@@ -1156,6 +1178,7 @@ VirtIoHwReinitialize(
         return FALSE;
     }
     RhelGetDiskGeometry(DeviceExtension);
+    RhelSetGuestFeatures(DeviceExtension);
 
     if (!VirtIoHwInitialize(DeviceExtension)) {
         return FALSE;
@@ -1388,44 +1411,56 @@ RhelScsiGetInquiryData(
 
         PVPD_SERIAL_NUMBER_PAGE SerialPage;
         SerialPage = (PVPD_SERIAL_NUMBER_PAGE)SRB_DATA_BUFFER(Srb);
+        RhelDbgPrint(TRACE_LEVEL_INFORMATION, "VPD_SERIAL_NUMBER dataLen = %d.\n", dataLen);
+
+        RtlZeroMemory(SerialPage, dataLen);
+        SerialPage->DeviceType = DIRECT_ACCESS_DEVICE;
+        SerialPage->DeviceTypeQualifier = DEVICE_CONNECTED;
         SerialPage->PageCode = VPD_SERIAL_NUMBER;
+
         if (!adaptExt->sn_ok) {
-           SerialPage->PageLength = 1;
-           SerialPage->SerialNumber[0] = '0';
-        } else {
-           SerialPage->PageLength = BLOCK_SERIAL_STRLEN;
-           StorPortMoveMemory(&SerialPage->SerialNumber, &adaptExt->sn, BLOCK_SERIAL_STRLEN);
+            if (!RhelGetSerialNumber(DeviceExtension, Srb)) {
+                RhelDbgPrint(TRACE_LEVEL_ERROR, "RhelGetSerialNumber failed.\n");
+                return SRB_STATUS_ERROR;
+            }
+            return SRB_STATUS_PENDING;
         }
-        SRB_SET_DATA_TRANSFER_LENGTH(Srb, (sizeof(VPD_SERIAL_NUMBER_PAGE) + SerialPage->PageLength));
+
+        if(dataLen >= 0x18) {
+            UCHAR len = strlen(adaptExt->sn);
+            SerialPage->PageLength = min(BLOCK_SERIAL_STRLEN, len);
+            RhelDbgPrint(TRACE_LEVEL_INFORMATION, "PageLength = %d (%d)\n", SerialPage->PageLength, len);
+            StorPortCopyMemory(&SerialPage->SerialNumber, &adaptExt->sn, SerialPage->PageLength);
+            SRB_SET_DATA_TRANSFER_LENGTH(Srb, (sizeof(VPD_SERIAL_NUMBER_PAGE) + SerialPage->PageLength));
+        }
+        else {
+            RhelDbgPrint(TRACE_LEVEL_FATAL, "RhelGetSerialNumber invalid dataLen = %d.\n", dataLen);
+            return SRB_STATUS_INVALID_REQUEST;
+        }
     }
     else if ((cdb->CDB6INQUIRY3.PageCode == VPD_DEVICE_IDENTIFIERS) &&
              (cdb->CDB6INQUIRY3.EnableVitalProductData == 1)) {
 
         PVPD_IDENTIFICATION_PAGE       IdentificationPage = NULL;
         PVPD_IDENTIFICATION_DESCRIPTOR IdentificationDescr = NULL;
+        UCHAR len = 0;
 
         IdentificationPage = (PVPD_IDENTIFICATION_PAGE)SRB_DATA_BUFFER(Srb);
         memset(IdentificationPage, 0, sizeof(VPD_IDENTIFICATION_PAGE));
         IdentificationPage->PageCode = VPD_DEVICE_IDENTIFIERS;
-        IdentificationPage->PageLength = sizeof(VPD_IDENTIFICATION_DESCRIPTOR) + 8;
 
         IdentificationDescr = (PVPD_IDENTIFICATION_DESCRIPTOR)IdentificationPage->Descriptors;
         memset(IdentificationDescr, 0, sizeof(VPD_IDENTIFICATION_DESCRIPTOR));
-        IdentificationDescr->CodeSet = VpdCodeSetBinary;
-        IdentificationDescr->IdentifierType = VpdIdentifierTypeEUI64;
-        IdentificationDescr->IdentifierLength = 8;
-        IdentificationDescr->Identifier[0] = (adaptExt->system_io_bus_number >> 12) & 0xF;
-        IdentificationDescr->Identifier[1] = (adaptExt->system_io_bus_number >> 8) & 0xF;
-        IdentificationDescr->Identifier[2] = (adaptExt->system_io_bus_number >> 4) & 0xF;
-        IdentificationDescr->Identifier[3] = adaptExt->system_io_bus_number & 0xF;
-        IdentificationDescr->Identifier[4] = (adaptExt->slot_number >> 12) & 0xF;
-        IdentificationDescr->Identifier[5] = (adaptExt->slot_number >> 8) & 0xF;
-        IdentificationDescr->Identifier[6] = (adaptExt->slot_number >> 4) & 0xF;
-        IdentificationDescr->Identifier[7] = adaptExt->slot_number & 0xF;
 
-        SRB_SET_DATA_TRANSFER_LENGTH(Srb, (sizeof(VPD_IDENTIFICATION_PAGE) +
-                                     IdentificationPage->PageLength));
+        if (!adaptExt->sn_ok) {
+            if (!RhelGetSerialNumber(DeviceExtension, Srb)) {
+                RhelDbgPrint(TRACE_LEVEL_ERROR, "RhelGetSerialNumber failed.\n");
+                return SRB_STATUS_ERROR;
+            }
+            return SRB_STATUS_PENDING;
+        }
 
+        ReportDeviceIdentifier(DeviceExtension, Srb);
     }
 #if (NTDDI_VERSION >= NTDDI_WIN7)
     else if ((cdb->CDB6INQUIRY3.PageCode == VPD_BLOCK_LIMITS) &&
@@ -1868,6 +1903,43 @@ CompleteDPC(
     return FALSE;
 }
 
+VOID
+ReportDeviceIdentifier(
+    IN PVOID DeviceExtension,
+    IN PSRB_TYPE Srb
+    )
+{
+    PVPD_IDENTIFICATION_PAGE       IdentificationPage = NULL;
+    PVPD_IDENTIFICATION_DESCRIPTOR IdentificationDescr = NULL;
+    PADAPTER_EXTENSION  adaptExt = (PADAPTER_EXTENSION)DeviceExtension;
+    UCHAR len = strlen(adaptExt->sn);
+
+    IdentificationPage = (PVPD_IDENTIFICATION_PAGE)SRB_DATA_BUFFER(Srb);
+    IdentificationDescr = (PVPD_IDENTIFICATION_DESCRIPTOR)IdentificationPage->Descriptors;
+    if (len) {
+        IdentificationDescr->IdentifierLength = min(BLOCK_SERIAL_STRLEN, len);
+        IdentificationDescr->CodeSet = VpdCodeSetAscii;
+        IdentificationDescr->IdentifierType = VpdIdentifierTypeVendorSpecific;
+        StorPortCopyMemory(&IdentificationDescr->Identifier, &adaptExt->sn, IdentificationDescr->IdentifierLength);
+    }
+    else {
+        IdentificationDescr->CodeSet = VpdCodeSetBinary;
+        IdentificationDescr->IdentifierType = VpdIdentifierTypeEUI64;
+        IdentificationDescr->IdentifierLength = 8;
+        IdentificationDescr->Identifier[0] = (adaptExt->system_io_bus_number >> 12) & 0xF;
+        IdentificationDescr->Identifier[1] = (adaptExt->system_io_bus_number >> 8) & 0xF;
+        IdentificationDescr->Identifier[2] = (adaptExt->system_io_bus_number >> 4) & 0xF;
+        IdentificationDescr->Identifier[3] = adaptExt->system_io_bus_number & 0xF;
+        IdentificationDescr->Identifier[4] = (adaptExt->slot_number >> 12) & 0xF;
+        IdentificationDescr->Identifier[5] = (adaptExt->slot_number >> 8) & 0xF;
+        IdentificationDescr->Identifier[6] = (adaptExt->slot_number >> 4) & 0xF;
+        IdentificationDescr->Identifier[7] = adaptExt->slot_number & 0xF;
+    }
+    IdentificationPage->PageLength = sizeof(VPD_IDENTIFICATION_DESCRIPTOR) + IdentificationDescr->IdentifierLength;
+    SRB_SET_DATA_TRANSFER_LENGTH(Srb, (sizeof(VPD_IDENTIFICATION_PAGE) +
+        IdentificationPage->PageLength));
+}
+
 UCHAR DeviceToSrbStatus(UCHAR status)
 {
     switch (status) {
@@ -1927,6 +1999,39 @@ VioStorCompleteRequest(
         Srb = (PSRB_TYPE)vbr->req;
         if (vbr->out_hdr.type == VIRTIO_BLK_T_GET_ID) {
             adaptExt->sn_ok = TRUE;
+            if (Srb) {
+                PCDB cdb = SRB_CDB(Srb);
+
+                if (!cdb)
+                    continue;
+
+                if ((cdb->CDB6INQUIRY3.PageCode == VPD_SERIAL_NUMBER) &&
+                    (cdb->CDB6INQUIRY3.EnableVitalProductData == 1)) {
+                    PVPD_SERIAL_NUMBER_PAGE SerialPage;
+                    ULONG dataLen = SRB_DATA_TRANSFER_LENGTH(Srb);
+                    UCHAR len = strlen(adaptExt->sn);
+
+                    SerialPage = (PVPD_SERIAL_NUMBER_PAGE)SRB_DATA_BUFFER(Srb);
+                    RhelDbgPrint(TRACE_LEVEL_INFORMATION, "dataLen = %d\n", dataLen);
+                    RtlZeroMemory(SerialPage, dataLen);
+                    SerialPage->DeviceType = DIRECT_ACCESS_DEVICE;
+                    SerialPage->DeviceTypeQualifier = DEVICE_CONNECTED;
+                    SerialPage->PageCode = VPD_SERIAL_NUMBER;
+
+                    SerialPage->PageLength = min(BLOCK_SERIAL_STRLEN, len);
+                    StorPortCopyMemory(&SerialPage->SerialNumber, &adaptExt->sn, SerialPage->PageLength);
+                    RhelDbgPrint(TRACE_LEVEL_FATAL, "PageLength = %d (%d)\n", SerialPage->PageLength, len);
+
+                    SRB_SET_DATA_TRANSFER_LENGTH(Srb, (sizeof(VPD_SERIAL_NUMBER_PAGE) + SerialPage->PageLength));
+                    CompleteRequestWithStatus(DeviceExtension, (PSRB_TYPE)Srb, SRB_STATUS_SUCCESS);
+                }
+                else if ((cdb->CDB6INQUIRY3.PageCode == VPD_DEVICE_IDENTIFIERS) &&
+                    (cdb->CDB6INQUIRY3.EnableVitalProductData == 1))
+                {
+                    ReportDeviceIdentifier(DeviceExtension, Srb);
+                    CompleteRequestWithStatus(DeviceExtension, (PSRB_TYPE)Srb, SRB_STATUS_SUCCESS);
+                }
+            }
             continue;
         }
         if (Srb) {

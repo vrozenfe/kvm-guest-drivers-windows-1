@@ -33,7 +33,6 @@
 #include "virtio_pci.h"
 #include "VirtIOWdf.h"
 #include "private.h"
-
 #include <wdmguid.h>
 
 extern VirtIOSystemOps VirtIOWdfSystemOps;
@@ -45,9 +44,12 @@ NTSTATUS VirtIOWdfInitialize(PVIRTIO_WDF_DRIVER pWdfDriver,
                              ULONG MemoryTag)
 {
     NTSTATUS status = STATUS_SUCCESS;
+    WDF_DMA_ENABLER_CONFIG dmaEnablerConfig;
+    WDF_OBJECT_ATTRIBUTES  attributes;
 
     RtlZeroMemory(pWdfDriver, sizeof(*pWdfDriver));
     pWdfDriver->MemoryTag = MemoryTag;
+    pWdfDriver->bLegacyMode = FALSE;
 
     /* get the PCI bus interface */
     status = WdfFdoQueryForInterface(
@@ -73,6 +75,26 @@ NTSTATUS VirtIOWdfInitialize(PVIRTIO_WDF_DRIVER pWdfDriver,
         return status;
     }
 
+    /* set max transfer size to 256M, should be enough for any purpose */
+    /* number of SG fragments is unlimited */
+    WDF_DMA_ENABLER_CONFIG_INIT(&dmaEnablerConfig, WdfDmaProfileScatterGather64Duplex, 0xFFFFFFF);
+    status = WdfDmaEnablerCreate(Device, &dmaEnablerConfig, WDF_NO_OBJECT_ATTRIBUTES, &pWdfDriver->DmaEnabler);
+    if (NT_SUCCESS(status)) {
+        WDF_OBJECT_ATTRIBUTES_INIT(&attributes);
+        DPrintf(0, "%s DMA enabler ready (alignment %d), pWdfDriver %p\n", __FUNCTION__,
+            WdfDeviceGetAlignmentRequirement(Device) + 1, pWdfDriver);
+        attributes.ParentObject = Device;
+        status = WdfCollectionCreate(&attributes, &pWdfDriver->MemoryBlockCollection);
+    }
+
+    if (NT_SUCCESS(status)) {
+        status = WdfSpinLockCreate(&attributes, &pWdfDriver->DmaSpinlock);
+    }
+
+    if (!NT_SUCCESS(status)) {
+        return status;
+    }
+
     /* initialize the underlying VirtIODevice */
     status = virtio_device_initialize(
         &pWdfDriver->VIODevice,
@@ -94,8 +116,34 @@ ULONGLONG VirtIOWdfGetDeviceFeatures(PVIRTIO_WDF_DRIVER pWdfDriver)
 }
 
 NTSTATUS VirtIOWdfSetDriverFeatures(PVIRTIO_WDF_DRIVER pWdfDriver,
-                                    ULONGLONG uFeatures)
+                                    ULONGLONG uPrivateFeaturesOn,
+                                    ULONGLONG uFeaturesOff)
 {
+    ULONGLONG uFeatures = 0, uDeviceFeatures = VirtIOWdfGetDeviceFeatures(pWdfDriver);
+    char drvTag[sizeof(pWdfDriver->MemoryTag) + 1];
+
+    drvTag[sizeof(pWdfDriver->MemoryTag)] = 0;
+    RtlCopyMemory(drvTag, &pWdfDriver->MemoryTag, sizeof(pWdfDriver->MemoryTag));
+
+    if (virtio_is_feature_enabled(uDeviceFeatures, VIRTIO_F_VERSION_1)) {
+        virtio_feature_enable(uFeatures, VIRTIO_F_VERSION_1);
+    }
+    if (virtio_is_feature_enabled(uDeviceFeatures, VIRTIO_F_ANY_LAYOUT)) {
+        virtio_feature_enable(uFeatures, VIRTIO_F_ANY_LAYOUT);
+    }
+    if (virtio_is_feature_enabled(uDeviceFeatures, VIRTIO_F_IOMMU_PLATFORM)) {
+        virtio_feature_enable(uFeatures, VIRTIO_F_IOMMU_PLATFORM);
+    }
+
+    if ((uDeviceFeatures & uPrivateFeaturesOn) != uPrivateFeaturesOn) {
+        DPrintf(0, "%s(%s) FAILED features %I64X != %I64X\n", __FUNCTION__,
+            drvTag, uPrivateFeaturesOn, (uDeviceFeatures & uPrivateFeaturesOn));
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    uFeatures |= uPrivateFeaturesOn;
+    uFeatures &= ~uFeaturesOff;
+
     /* make sure that we always follow the status bit-setting protocol */
     u8 status = virtio_get_status(&pWdfDriver->VIODevice);
     if (!(status & VIRTIO_CONFIG_S_ACKNOWLEDGE)) {
@@ -113,6 +161,14 @@ NTSTATUS VirtIOWdfSetDriverFeatures(PVIRTIO_WDF_DRIVER pWdfDriver,
 static NTSTATUS VirtIOWdfFinalizeFeatures(PVIRTIO_WDF_DRIVER pWdfDriver)
 {
     NTSTATUS status = STATUS_SUCCESS;
+
+    if (!pWdfDriver->uFeatures) {
+        /* specific driver does not have any special features requirements */
+        status = VirtIOWdfSetDriverFeatures(pWdfDriver, 0, 0);
+    }
+    if (!NT_SUCCESS(status)) {
+        return status;
+    }
 
     u8 dev_status = virtio_get_status(&pWdfDriver->VIODevice);
     if (!(dev_status & VIRTIO_CONFIG_S_ACKNOWLEDGE)) {

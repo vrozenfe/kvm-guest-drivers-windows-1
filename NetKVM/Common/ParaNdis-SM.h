@@ -8,7 +8,8 @@ enum SMNotifications {
     stopped,
     SupriseRemoved,
     NeedsReset,
-    PoweredOn
+    PoweredOn,
+    PoweringOff
 };
 
 class CFlowStateMachine : public CPlacementAllocatable
@@ -27,8 +28,7 @@ public:
 
     virtual void Stop(NDIS_STATUS Reason = NDIS_STATUS_PAUSED)
     {
-        NETKVM_ASSERT(m_State == FlowState::Running ||
-            m_State == FlowState::SurpriseRemoved);
+        NETKVM_ASSERT(m_State == FlowState::Running);
         m_State = FlowState::Stopping;
         m_StopReason = Reason;
         m_NoOutstandingItems.Clear();
@@ -39,7 +39,7 @@ public:
 
     virtual void SupriseRemove()
     {
-        m_State = FlowState::SurpriseRemoved;
+        m_SurpriseRemoved = true;
     }
 
     virtual bool RegisterOutstandingItems(ULONG NumItems,
@@ -119,8 +119,7 @@ protected:
     {
         Running,
         Stopping,
-        Stopped,
-        SurpriseRemoved
+        Stopped
     };
 
     CNdisRefCounter m_Counter;
@@ -128,6 +127,7 @@ protected:
     CNdisSpinLock m_CompleteStoppingLock;
     CNdisEvent m_NoOutstandingItems;
     NDIS_STATUS m_StopReason = NDIS_STATUS_PAUSED;
+    bool m_SurpriseRemoved = false;
 };
 
 class CDataFlowStateMachine : public CFlowStateMachine
@@ -175,6 +175,51 @@ private:
     DECLARE_CNDISLIST_ENTRY(CConfigFlowStateMachine);
 };
 
+class CFlowStateMachineWithPointer : public CFlowStateMachine
+{
+public:
+    CFlowStateMachineWithPointer() : m_Value(NULL) { }
+    void Clear()
+    {
+        Stop();
+        m_Value = NULL;
+    }
+    void Set(PVOID Value)
+    {
+        m_Value = Value;
+        Start();
+    }
+    PVOID Reference()
+    {
+        if (!RegisterOutstandingItem())
+            return NULL;
+        if (!m_Value)
+        {
+            UnregisterOutstandingItem();
+            return NULL;
+        }
+        return m_Value;
+    }
+    void Dereference()
+    {
+        UnregisterOutstandingItem();
+    }
+private:
+    PVOID m_Value;
+};
+
+class CBindingToSriov : public CFlowStateMachineWithPointer, public CObserver<SMNotifications>
+{
+public:
+    void SetAdapterContext(PVOID Context)
+    {
+        m_Context = Context;
+    }
+private:
+    void Notify(SMNotifications message) override;
+    PVOID m_Context = NULL;
+};
+
 class CMiniportStateMachine : public CPlacementAllocatable, public CObservee<SMNotifications>
 {
 public:
@@ -190,10 +235,12 @@ public:
         void UnregisterFlow(CConfigFlowStateMachine &Flow)
         { m_ConfigFlows.Remove(&Flow); }
 
-        void NotifyInitialized()
+        void NotifyInitialized(PVOID AdapterContext)
         {
             StartConfigFlows();
             ChangeState(MiniportState::Paused, MiniportState::Halted);
+            m_BindingToSriov.SetAdapterContext(AdapterContext);
+            Add(&m_BindingToSriov);
         }
 
         void NotifyShutdown()
@@ -267,11 +314,33 @@ public:
             {
                 ChangeState(MiniportState::Suspended, MiniportState::Paused);
             }
+            UpdateFlowsOnEvent(SMNotifications::PoweringOff);
         }
 
         void NotifyHalted()
         {
-            StopConfigFlows(NDIS_STATUS_PAUSED); }
+            StopConfigFlows(NDIS_STATUS_PAUSED);
+        }
+
+        void NotifyBindSriov(PVOID Value)
+        {
+            m_BindingToSriov.Set(Value);
+        }
+
+        void NotifyUnbindSriov()
+        {
+            m_BindingToSriov.Clear();
+        }
+
+        PVOID ReferenceSriovBinding()
+        {
+            return m_BindingToSriov.Reference();
+        }
+
+        void DereferenceSriovBinding()
+        {
+            m_BindingToSriov.Dereference();
+        }
 
         CMiniportStateMachine() = default;
         ~CMiniportStateMachine() = default;
@@ -350,4 +419,5 @@ private:
     MiniportState m_State = MiniportState::Halted;
     CNdisList<CDataFlowStateMachine, CRawAccess, CNonCountingObject> m_DataFlows;
     CNdisList<CConfigFlowStateMachine, CRawAccess, CNonCountingObject> m_ConfigFlows;
+    CBindingToSriov m_BindingToSriov;
 };

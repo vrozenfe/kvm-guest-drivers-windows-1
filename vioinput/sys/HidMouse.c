@@ -73,6 +73,16 @@ typedef struct _tagInputClassMouse
     ULONG  uFlags;
 } INPUT_CLASS_MOUSE, *PINPUT_CLASS_MOUSE;
 
+static UCHAR FORCEINLINE TrimRelative(long val)
+{
+    if (val < -127) {
+        return (UCHAR)(-127);
+    } else if (val > 127) {
+        return 127;
+    }
+    return (UCHAR)val;
+}
+
 static NTSTATUS
 HIDMouseEventToReport(
     PINPUT_CLASS_COMMON pClass,
@@ -108,7 +118,7 @@ HIDMouseEventToReport(
                     else
 #endif // EXPOSE_ABS_AXES_WITH_BUTTONS_AS_MOUSE
                     {
-                        pReport[pMouseDesc->cbAxisOffset + pMap[1]] = (UCHAR)pEvent->value;
+                        pReport[pMouseDesc->cbAxisOffset + pMap[1]] = TrimRelative((long)pEvent->value);
                     }
                     pClass->bDirty = TRUE;
                     break;
@@ -430,6 +440,11 @@ HIDMouseProbe(
                     // we specify the minimum and maximum per-axis
                     HIDAppend2(pHidDesc, HID_TAG_LOGICAL_MINIMUM, AbsInfo.min);
                     HIDAppend2(pHidDesc, HID_TAG_LOGICAL_MAXIMUM, AbsInfo.max);
+                    if (AbsInfo.min != 0 || AbsInfo.max != MAXSHORT)
+                    {
+                        HIDAppend2(pHidDesc, HID_TAG_PHYSICAL_MINIMUM, 0);
+                        HIDAppend2(pHidDesc, HID_TAG_PHYSICAL_MAXIMUM, 0x7fff);
+                    }
 
                     HIDAppend2(pHidDesc, HID_TAG_REPORT_SIZE, 0x10); // 2 bytes
                     HIDAppend2(pHidDesc, HID_TAG_REPORT_COUNT, 0x01);

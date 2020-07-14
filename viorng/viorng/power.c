@@ -92,7 +92,6 @@ NTSTATUS VirtRngEvtDeviceD0Entry(IN WDFDEVICE Device,
     NTSTATUS status = STATUS_SUCCESS;
     PDEVICE_CONTEXT context = GetDeviceContext(Device);
     VIRTIO_WDF_QUEUE_PARAM param;
-    u64 u64HostFeatures, u64GuestFeatures = 0;
 
     UNREFERENCED_PARAMETER(PreviousState);
 
@@ -101,18 +100,6 @@ NTSTATUS VirtRngEvtDeviceD0Entry(IN WDFDEVICE Device,
 
     PAGED_CODE();
 
-    u64HostFeatures = VirtIOWdfGetDeviceFeatures(&context->VDevice);
-
-    if (virtio_is_feature_enabled(u64HostFeatures, VIRTIO_F_VERSION_1))
-    {
-        virtio_feature_enable(u64GuestFeatures, VIRTIO_F_VERSION_1);
-    }
-    if (virtio_is_feature_enabled(u64HostFeatures, VIRTIO_F_ANY_LAYOUT))
-    {
-        virtio_feature_enable(u64GuestFeatures, VIRTIO_F_ANY_LAYOUT);
-    }
-
-    status = VirtIOWdfSetDriverFeatures(&context->VDevice, u64GuestFeatures);
     if (NT_SUCCESS(status))
     {
         param.Interrupt = context->WdfInterrupt;
@@ -129,6 +116,12 @@ NTSTATUS VirtRngEvtDeviceD0Entry(IN WDFDEVICE Device,
         VirtIOWdfSetDriverFailed(&context->VDevice);
         TraceEvents(TRACE_LEVEL_ERROR, DBG_POWER,
             "VirtIOWdfInitQueues failed with %x\n", status);
+    }
+
+    context->SingleBufferVA = VirtIOWdfDeviceAllocDmaMemory(&context->VDevice.VIODevice, PAGE_SIZE, 0);
+    if (context->SingleBufferVA)
+    {
+        context->SingleBufferPA = VirtIOWdfDeviceGetPhysicalAddress(&context->VDevice.VIODevice, context->SingleBufferVA);
     }
 
     TraceEvents(TRACE_LEVEL_VERBOSE, DBG_POWER, "<-- %!FUNC!");
@@ -149,6 +142,11 @@ NTSTATUS VirtRngEvtDeviceD0Exit(IN WDFDEVICE Device,
     PAGED_CODE();
 
     VirtIOWdfDestroyQueues(&context->VDevice);
+
+    if (context->SingleBufferVA)
+    {
+        VirtIOWdfDeviceFreeDmaMemory(&context->VDevice.VIODevice, context->SingleBufferVA);
+    }
 
     TraceEvents(TRACE_LEVEL_VERBOSE, DBG_POWER, "<-- %!FUNC!");
 

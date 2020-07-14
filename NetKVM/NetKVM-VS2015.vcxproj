@@ -286,12 +286,6 @@
       <EnablePREfast>false</EnablePREfast>
     </ClCompile>
   </ItemDefinitionGroup>
-  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Win10 Release|Win32'">
-    <ClCompile>
-      <PreprocessorDefinitions>%(PreprocessorDefinitions);NDIS630_MINIPORT=1</PreprocessorDefinitions>
-      <EnablePREfast>false</EnablePREfast>
-    </ClCompile>
-  </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Win7 Release|x64'">
     <ClCompile>
       <PreprocessorDefinitions>%(PreprocessorDefinitions);NDIS620_MINIPORT=1</PreprocessorDefinitions>
@@ -335,23 +329,11 @@
       <EnablePREfast>false</EnablePREfast>
     </ClCompile>
   </ItemDefinitionGroup>
-  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Win10 Release|x64'">
+  <ItemDefinitionGroup Condition="'$(Configuration)'=='Win10 Release'">
     <ClCompile>
-      <PreprocessorDefinitions>%(PreprocessorDefinitions);NDIS630_MINIPORT=1</PreprocessorDefinitions>
+      <PreprocessorDefinitions>%(PreprocessorDefinitions);NDIS680_MINIPORT=1;NTDDI_VERSION=0xA0000004</PreprocessorDefinitions>
       <EnablePREfast>false</EnablePREfast>
     </ClCompile>
-    <ResourceCompile>
-      <PreprocessorDefinitions>%(PreprocessorDefinitions);NDIS630_MINIPORT=1</PreprocessorDefinitions>
-    </ResourceCompile>
-  </ItemDefinitionGroup>
-  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Win10 Release|ARM64'">
-    <ClCompile>
-      <PreprocessorDefinitions>%(PreprocessorDefinitions);NDIS630_MINIPORT=1</PreprocessorDefinitions>
-      <EnablePREfast>false</EnablePREfast>
-    </ClCompile>
-    <ResourceCompile>
-      <PreprocessorDefinitions>%(PreprocessorDefinitions);NDIS630_MINIPORT=1</PreprocessorDefinitions>
-    </ResourceCompile>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup>
     <CustomBuildStep>
@@ -379,6 +361,7 @@
     <ClInclude Include="Common\ethernetutils.h" />
     <ClInclude Include="Common\ndis56common.h" />
     <ClInclude Include="Common\Parandis_DesignPatterns.h" />
+    <ClInclude Include="Common\ParaNdis_Protocol.h" />
     <ClInclude Include="Common\Trace.h" />
     <ClInclude Include="Common\osdep.h" />
     <ClInclude Include="Common\ParaNdis-AbstractPath.h" />
@@ -403,23 +386,24 @@
     <ResourceCompile Include="wlh\Parandis6.rc" />
   </ItemGroup>
   <ItemGroup>
-    <ClCompile Include="Common\ParaNdis-AbstractPath.cpp" />
-    <ClCompile Include="Common\ParaNdis-Common.cpp" />
-    <ClCompile Include="Common\ParaNdis-CX.cpp" />
-    <ClCompile Include="Common\ParaNdis-Debug.cpp" />
-    <ClCompile Include="Common\ParaNdis-Oid.cpp" />
-    <ClCompile Include="Common\ParaNdis-RX.cpp" />
-    <ClCompile Include="Common\ParaNdis-TX.cpp" />
+    <ClCompile Include="Common\ParaNdis_AbstractPath.cpp" />
+    <ClCompile Include="Common\ParaNdis_Common.cpp" />
+    <ClCompile Include="Common\ParaNdis_CX.cpp" />
+    <ClCompile Include="Common\ParaNdis_Debug.cpp" />
+    <ClCompile Include="Common\ParaNdis_Oid.cpp" />
+    <ClCompile Include="Common\ParaNdis_Protocol.cpp" />
+    <ClCompile Include="Common\ParaNdis_RX.cpp" />
+    <ClCompile Include="Common\ParaNdis_TX.cpp" />
     <ClInclude Include="Common\ParaNdis-SM.h" />
-    <ClCompile Include="Common\ParaNdis-Util.cpp" />
-    <ClCompile Include="Common\ParaNdis-VirtIO.cpp" />
-    <ClCompile Include="Common\ParaNdis-VirtQueue.cpp" />
+    <ClCompile Include="Common\ParaNdis_Util.cpp" />
+    <ClCompile Include="Common\ParaNdis_VirtIO.cpp" />
+    <ClCompile Include="Common\ParaNdis_VirtQueue.cpp" />
     <ClCompile Include="Common\ParaNdis_GuestAnnounce.cpp" />
-    <ClCompile Include="Common\sw-offload.cpp" />
-    <ClCompile Include="wlh\ParaNdis6-Driver.cpp" />
-    <ClCompile Include="wlh\ParaNdis6-Impl.cpp" />
-    <ClCompile Include="wlh\ParaNdis6-Oid.cpp" />
-    <ClCompile Include="wlh\ParaNdis6-RSS.cpp" />
+    <ClCompile Include="Common\sw_offload.cpp" />
+    <ClCompile Include="wlh\ParaNdis6_Driver.cpp" />
+    <ClCompile Include="wlh\ParaNdis6_Impl.cpp" />
+    <ClCompile Include="wlh\ParaNdis6_Oid.cpp" />
+    <ClCompile Include="wlh\ParaNdis6_RSS.cpp" />
   </ItemGroup>
   <ItemGroup>
     <None Include="tools\cleanemptystrings.vbs" />

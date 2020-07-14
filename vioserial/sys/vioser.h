@@ -101,6 +101,9 @@ typedef struct _tagPortDevice
 
     BOOLEAN             DeviceOK;
     UINT                DeviceId;
+    ULONG               DmaGroupTag;
+    PVIRTIO_DMA_MEMORY_SLICED
+                        ControlDmaBlock;
 } PORTS_DEVICE, *PPORTS_DEVICE;
 
 WDF_DECLARE_CONTEXT_TYPE_WITH_NAME(PORTS_DEVICE, GetPortsDevice)
@@ -124,6 +127,7 @@ typedef struct _tagPortBuffer
     size_t              size;
     size_t              len;
     size_t              offset;
+    VirtIODevice        *vdev;
 } PORT_BUFFER, * PPORT_BUFFER;
 
 typedef struct _WriteBufferEntry
@@ -131,7 +135,9 @@ typedef struct _WriteBufferEntry
     SINGLE_LIST_ENTRY ListEntry;
     WDFMEMORY EntryHandle;
     WDFREQUEST Request;
-    PVOID Buffer;
+    PVOID      OriginalWriteBuffer;
+    SIZE_T     OriginalWriteBufferSize;
+    WDFDMATRANSACTION dmaTransaction;
 } WRITE_BUFFER_ENTRY, *PWRITE_BUFFER_ENTRY;
 
 typedef struct _tagVioSerialPort
@@ -146,6 +152,7 @@ typedef struct _tagVioSerialPort
     WDFSPINLOCK         OutVqLock;
     ANSI_STRING         NameString;
     UINT                PortId;
+    ULONG               DmaGroupTag;
     UINT                DeviceId;
     BOOLEAN             OutVqFull;
     BOOLEAN             HostConnected;
@@ -186,7 +193,8 @@ WDF_DECLARE_CONTEXT_TYPE_WITH_NAME(DRIVER_CONTEXT, GetDriverContext)
 NTSTATUS
 VIOSerialFillQueue(
     IN struct virtqueue *vq,
-    IN WDFSPINLOCK Lock
+    IN WDFSPINLOCK Lock,
+    IN ULONG id /* unique id to free all the blocks related to the queue */
 );
 
 VOID
@@ -213,8 +221,7 @@ VIOSerialReclaimConsumedBuffers(
 size_t
 VIOSerialSendBuffers(
     IN PVIOSERIAL_PORT Port,
-    IN PWRITE_BUFFER_ENTRY Entry,
-    IN size_t Length
+    IN PWRITE_BUFFER_ENTRY Entry
 );
 
 SSIZE_T
@@ -225,8 +232,9 @@ VIOSerialFillReadBufLocked(
 );
 
 PPORT_BUFFER
-VIOSerialAllocateBuffer(
-    IN size_t buf_size
+VIOSerialAllocateSinglePageBuffer(
+    IN VirtIODevice *vdev,
+    IN ULONG id
 );
 
 VOID
@@ -317,6 +325,7 @@ EVT_WDF_IO_QUEUE_IO_WRITE _IRQL_requires_(PASSIVE_LEVEL) VIOSerialPortWrite;
 EVT_WDF_IO_QUEUE_IO_STOP _IRQL_requires_(PASSIVE_LEVEL) VIOSerialPortReadIoStop;
 EVT_WDF_IO_QUEUE_IO_STOP _IRQL_requires_(PASSIVE_LEVEL) VIOSerialPortWriteIoStop;
 EVT_WDF_IO_QUEUE_IO_DEVICE_CONTROL _IRQL_requires_(PASSIVE_LEVEL) VIOSerialPortDeviceControl;
+EVT_WDF_REQUEST_CANCEL VIOSerialPortWriteRequestCancel;
 
 EVT_WDF_DEVICE_FILE_CREATE VIOSerialPortCreate;
 EVT_WDF_FILE_CLOSE VIOSerialPortClose;

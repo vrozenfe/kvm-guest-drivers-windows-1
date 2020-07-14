@@ -1,8 +1,15 @@
-//#include <basetyps.h>
+#include "speed-test.h"
+
+#ifndef linux
+
 #include "device.h"
 #include "assert.h"
 
+
 #pragma warning(default:4201)
+
+static ULONG write_buffer_size = 4096;
+static BOOL  write_send_auto = FALSE;
 
 BOOL
 GetInfoTest(
@@ -52,7 +59,7 @@ WriteTest(
     PUCHAR  buf = NULL;
     BOOLEAN res = TRUE;
     int     i;
-    size_t  size = 4096;
+    size_t  size = write_buffer_size;
 
     if (!pDev) return FALSE;
 
@@ -71,10 +78,21 @@ WriteTest(
 
     for(i = 0 ;i < (int)size; i++)
     {
-        int ch = getchar();
+        if (!write_send_auto)
+        {
+            int ch = getchar();
 
-        buf[i] = (char)ch;
-        if (ch == '\n') break;
+            buf[i] = (char)ch;
+            if (ch == '\n') break;
+        }
+        else
+        {
+            buf[i] = 'a' + i % 20;
+            if (i == (size - 1))
+            {
+                buf[i] = '\n';
+            }
+        }
     }
     size = i;
     res =  ovrl ? pDev->WriteEx(buf, &size) : pDev->Write(buf, &size);
@@ -88,7 +106,9 @@ WriteTest(
     {
         printf ("%s: WriteFile OK: "
                 "snd %zd bytes\n\n", __FUNCTION__, size);
-        printf ("%s\n", buf);
+        if (!write_send_auto) {
+            printf("%s\n", buf);
+        }
     }
 
     GlobalFree(buf);
@@ -189,12 +209,23 @@ wmain(
     CDevice *m_pDev;
     BOOLEAN stoptest = FALSE;
     BOOLEAN ovrl = TRUE;
+    UINT ifIndex = 0;
+    int speedTest = 0;
 
     if(argc == 2)
     {
-        if (_wcsicmp(L"-n", argv[1]) == 0) {
+        if (_wcsicmp(L"-sp", argv[1]) == 0) {
+            speedTest = 1;
+        }
+        else if (_wcsicmp(L"-n", argv[1]) == 0) {
            ovrl = FALSE;
         }
+    }
+
+    if (speedTest)
+    {
+        speed_test(true);
+        return 0;
     }
 
     if (ovrl)
@@ -211,10 +242,14 @@ wmain(
     {
         return 1;
     }
-    if (!m_pDev->Init(ovrl))
+    while (!m_pDev->Init(ovrl, ifIndex))
     {
-        delete m_pDev;
-        return 2;
+        ifIndex++;
+        if (ifIndex >= 4)
+        {
+            delete m_pDev;
+            return 2;
+        }
     }
 
     while (!stoptest)
@@ -227,6 +262,20 @@ wmain(
            case 'I':
               GetInfoTest(m_pDev);
               break;
+           case '+':
+               write_buffer_size = write_buffer_size * 2;
+               printf("write_buffer_size = %d\n", write_buffer_size);
+               break;
+           case '-':
+               if (write_buffer_size > 16) {
+                   write_buffer_size = write_buffer_size / 2;
+               }
+               printf("write_buffer_size = %d\n", write_buffer_size);
+               break;
+           case '!':
+               write_send_auto = !write_send_auto;
+               printf("write_send_auto = %d\n", write_send_auto);
+               break;
            case 'r':
            case 'R':
               ReadTest(m_pDev, ovrl);
@@ -253,3 +302,13 @@ wmain(
     delete m_pDev;
     return 0;
 }
+
+#else
+
+int main()
+{
+    speed_test(false);
+    return 0;
+}
+
+#endif

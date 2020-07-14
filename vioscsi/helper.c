@@ -36,7 +36,7 @@
 #include "helper.tmh"
 #endif
 
-#define SET_VA_PA() { ULONG len; va = adaptExt->indirect ? srbExt->desc : NULL; \
+#define SET_VA_PA() { ULONG len; va = adaptExt->indirect ? srbExt->pdesc : NULL; \
                       pa = va ? StorPortGetPhysicalAddress(DeviceExtension, NULL, va, &len).QuadPart : 0; \
                     }
 
@@ -110,7 +110,7 @@ ENTER_FN_SRB();
         RhelDbgPrint(TRACE_LEVEL_INFORMATION, " add packet to queue (%d) SRB = %p isr = %d.\n", QueueNumber, srbExt->Srb, isr);
         SET_VA_PA();
         if (virtqueue_add_buf(adaptExt->vq[QueueNumber],
-                         &srbExt->sg[0],
+                         srbExt->psgl,
                          srbExt->out, srbExt->in,
                          &srbExt->cmd, va, pa) >= 0){
             notify  = virtqueue_kick_prepare(adaptExt->vq[QueueNumber]) ? TRUE : notify;
@@ -156,7 +156,7 @@ SynchronizedTMFRoutine(
 ENTER_FN();
     SET_VA_PA();
     if (virtqueue_add_buf(adaptExt->vq[VIRTIO_SCSI_CONTROL_QUEUE],
-                     &srbExt->sg[0],
+                     srbExt->psgl,
                      srbExt->out, srbExt->in,
                      &srbExt->cmd, va, pa) >= 0){
         virtqueue_kick(adaptExt->vq[VIRTIO_SCSI_CONTROL_QUEUE]);
@@ -207,13 +207,16 @@ ENTER_FN();
     cmd->req.tmf.type = VIRTIO_SCSI_T_TMF;
     cmd->req.tmf.subtype = VIRTIO_SCSI_T_TMF_LOGICAL_UNIT_RESET;
 
+    srbExt->psgl = srbExt->vio_sg;
+    srbExt->pdesc = srbExt->desc_alias;
+    srbExt->allocated = 0;
     sgElement = 0;
-    srbExt->sg[sgElement].physAddr = StorPortGetPhysicalAddress(DeviceExtension, NULL, &cmd->req.tmf, &fragLen);
-    srbExt->sg[sgElement].length   = sizeof(cmd->req.tmf);
+    srbExt->psgl[sgElement].physAddr = StorPortGetPhysicalAddress(DeviceExtension, NULL, &cmd->req.tmf, &fragLen);
+    srbExt->psgl[sgElement].length   = sizeof(cmd->req.tmf);
     sgElement++;
     srbExt->out = sgElement;
-    srbExt->sg[sgElement].physAddr = StorPortGetPhysicalAddress(DeviceExtension, NULL, &cmd->resp.tmf, &fragLen);
-    srbExt->sg[sgElement].length = sizeof(cmd->resp.tmf);
+    srbExt->psgl[sgElement].physAddr = StorPortGetPhysicalAddress(DeviceExtension, NULL, &cmd->resp.tmf, &fragLen);
+    srbExt->psgl[sgElement].length = sizeof(cmd->resp.tmf);
     sgElement++;
     srbExt->in = sgElement - srbExt->out;
     StorPortPause(DeviceExtension, 60);
@@ -296,6 +299,53 @@ ENTER_FN();
 EXIT_FN();
 }
 
+
+VOID
+SetGuestFeatures(
+    IN PVOID DeviceExtension
+)
+{
+    ULONGLONG          guestFeatures = 0;
+    PADAPTER_EXTENSION adaptExt = (PADAPTER_EXTENSION)DeviceExtension;
+ENTER_FN();
+
+    if (CHECKBIT(adaptExt->features, VIRTIO_F_VERSION_1)) {
+        guestFeatures |= (1ULL << VIRTIO_F_VERSION_1);
+        if (CHECKBIT(adaptExt->features, VIRTIO_F_RING_PACKED)) {
+            guestFeatures |= (1ULL << VIRTIO_F_RING_PACKED);
+        }
+    }
+    if (CHECKBIT(adaptExt->features, VIRTIO_F_ANY_LAYOUT)) {
+        guestFeatures |= (1ULL << VIRTIO_F_ANY_LAYOUT);
+    }
+#if (WINVER == 0x0A00)
+    if (CHECKBIT(adaptExt->features, VIRTIO_F_IOMMU_PLATFORM)) {
+        guestFeatures |= (1ULL << VIRTIO_F_IOMMU_PLATFORM);
+    }
+#endif
+    if (CHECKBIT(adaptExt->features, VIRTIO_RING_F_EVENT_IDX)) {
+        guestFeatures |= (1ULL << VIRTIO_RING_F_EVENT_IDX);
+    }
+    if (CHECKBIT(adaptExt->features, VIRTIO_RING_F_INDIRECT_DESC)) {
+        guestFeatures |= (1ULL << VIRTIO_RING_F_INDIRECT_DESC);
+        if(!adaptExt->dump_mode) {
+            adaptExt->indirect = TRUE;
+        }
+    }
+    if (CHECKBIT(adaptExt->features, VIRTIO_SCSI_F_CHANGE)) {
+        guestFeatures |= (1ULL << VIRTIO_SCSI_F_CHANGE);
+    }
+    if (CHECKBIT(adaptExt->features, VIRTIO_SCSI_F_HOTPLUG)) {
+        guestFeatures |= (1ULL << VIRTIO_SCSI_F_HOTPLUG);
+    }
+    if (!NT_SUCCESS(virtio_set_features(&adaptExt->vdev, guestFeatures))) {
+        RhelDbgPrint(TRACE_LEVEL_FATAL, " virtio_set_features failed\n");
+    }
+
+EXIT_FN();
+}
+
+
 BOOLEAN
 InitVirtIODevice(
     IN PVOID DeviceExtension
@@ -332,6 +382,7 @@ InitHW(
 ENTER_FN();
     adaptExt = (PADAPTER_EXTENSION)DeviceExtension;
     adaptExt->system_io_bus_number = ConfigInfo->SystemIoBusNumber;
+    adaptExt->slot_number = ConfigInfo->SlotNumber;
 
     /* read PCI config space */
     pci_cfg_len = StorPortGetBusData(

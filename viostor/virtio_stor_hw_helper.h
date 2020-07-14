@@ -158,10 +158,10 @@ RhelGetSectors(
     IN PCDB Cdb
     );
 
-VOID
+BOOLEAN
 RhelGetSerialNumber(
-    IN PVOID DeviceExtension
-    );
+    IN PVOID DeviceExtension,
+    IN PSRB_TYPE Srb);
 
 VOID
 RhelGetDiskGeometry(

@@ -34,11 +34,166 @@
 #include "virtio.h"
 #include "kdebugprint.h"
 #include "virtio_ring.h"
+#include "windows\virtio_ring_allocation.h"
 
 #define DESC_INDEX(num, i) ((i) & ((num) - 1))
 
-/* Returns the index of the first unused descriptor */
-static inline u16 get_unused_desc(struct virtqueue *vq)
+ /* This marks a buffer as continuing via the next field. */
+#define VIRTQ_DESC_F_NEXT	1
+/* This marks a buffer as write-only (otherwise read-only). */
+#define VIRTQ_DESC_F_WRITE	2
+/* This means the buffer contains a list of buffer descriptors. */
+#define VIRTQ_DESC_F_INDIRECT	4
+
+/* The Host uses this in used->flags to advise the Guest: don't kick me when
+* you add a buffer.  It's unreliable, so it's simply an optimization.  Guest
+* will still kick if it's out of buffers. */
+#define VIRTQ_USED_F_NO_NOTIFY	1
+/* The Guest uses this in avail->flags to advise the Host: don't interrupt me
+* when you consume a buffer.  It's unreliable, so it's simply an
+* optimization.  */
+#define VIRTQ_AVAIL_F_NO_INTERRUPT	1
+
+#pragma warning (push)
+#pragma warning (disable:4200)
+
+#include <pshpack1.h>
+
+/* Virtio ring descriptors: 16 bytes.  These can chain together via "next". */
+struct vring_desc {
+    /* Address (guest-physical). */
+    __virtio64 addr;
+    /* Length. */
+    __virtio32 len;
+    /* The flags as indicated above. */
+    __virtio16 flags;
+    /* We chain unused descriptors via this, too */
+    __virtio16 next;
+};
+
+struct vring_avail {
+    __virtio16 flags;
+    __virtio16 idx;
+    __virtio16 ring[];
+};
+
+/* u32 is used here for ids for padding reasons. */
+struct vring_used_elem {
+    /* Index of start of used descriptor chain. */
+    __virtio32 id;
+    /* Total length of the descriptor chain which was used (written to) */
+    __virtio32 len;
+};
+
+struct vring_used {
+    __virtio16 flags;
+    __virtio16 idx;
+    struct vring_used_elem ring[];
+};
+
+#include <poppack.h>
+
+/* Alignment requirements for vring elements.
+* When using pre-virtio 1.0 layout, these fall out naturally.
+*/
+#define VRING_AVAIL_ALIGN_SIZE 2
+#define VRING_USED_ALIGN_SIZE 4
+#define VRING_DESC_ALIGN_SIZE 16
+
+/* The standard layout for the ring is a continuous chunk of memory which looks
+* like this.  We assume num is a power of 2.
+*
+* struct vring
+* {
+*	// The actual descriptors (16 bytes each)
+*	struct vring_desc desc[num];
+*
+*	// A ring of available descriptor heads with free-running index.
+*	__virtio16 avail_flags;
+*	__virtio16 avail_idx;
+*	__virtio16 available[num];
+*	__virtio16 used_event_idx;
+*
+*	// Padding to the next align boundary.
+*	char pad[];
+*
+*	// A ring of used descriptor heads with free-running index.
+*	__virtio16 used_flags;
+*	__virtio16 used_idx;
+*	struct vring_used_elem used[num];
+*	__virtio16 avail_event_idx;
+* };
+*/
+/* We publish the used event index at the end of the available ring, and vice
+* versa. They are at the end for backwards compatibility. */
+
+struct vring {
+    unsigned int num;
+
+    struct vring_desc *desc;
+
+    struct vring_avail *avail;
+
+    struct vring_used *used;
+};
+
+#define vring_used_event(vr) ((vr)->avail->ring[(vr)->num])
+#define vring_avail_event(vr) (*(__virtio16 *)&(vr)->used->ring[(vr)->num])
+
+static inline void vring_init(struct vring *vr, unsigned int num, void *p,
+    unsigned long align)
+{
+    vr->num = num;
+    vr->desc = (struct vring_desc *)p;
+    vr->avail = (struct vring_avail *)((__u8 *)p + num * sizeof(struct vring_desc));
+    vr->used = (struct vring_used *)(((ULONG_PTR)&vr->avail->ring[num] + sizeof(__virtio16)
+        + align - 1) & ~((ULONG_PTR)align - 1));
+}
+
+static inline unsigned vring_size_split(unsigned int num, unsigned long align)
+{
+#pragma warning (push)
+#pragma warning (disable:4319)
+    return ((sizeof(struct vring_desc) * num + sizeof(__virtio16) * (3 + num)
+        + align - 1) & ~(align - 1))
+        + sizeof(__virtio16) * 3 + sizeof(struct vring_used_elem) * num;
+#pragma warning(pop)
+}
+
+/* The following is used with USED_EVENT_IDX and AVAIL_EVENT_IDX */
+/* Assuming a given event_idx value from the other side, if
+* we have just incremented index from old to new_idx,
+* should we trigger an event? */
+static inline int vring_need_event(__u16 event_idx, __u16 new_idx, __u16 old)
+{
+    /* Note: Xen has similar logic for notification hold-off
+    * in include/xen/interface/io/ring.h with req_event and req_prod
+    * corresponding to event_idx + 1 and new_idx respectively.
+    * Note also that req_event and req_prod in Xen start at 1,
+    * event indexes in virtio start at 0. */
+    return (__u16)(new_idx - event_idx - 1) < (__u16)(new_idx - old);
+}
+
+struct virtqueue_split {
+    struct virtqueue vq;
+    struct vring vring;
+    struct {
+        u16 flags;
+        u16 idx;
+    } master_vring_avail;
+    unsigned int num_unused;
+    unsigned int num_added_since_kick;
+    u16 first_unused;
+    u16 last_used;
+    void *opaque[];
+};
+
+#define splitvq(vq) ((struct virtqueue_split *)vq)
+
+#pragma warning (pop)
+
+ /* Returns the index of the first unused descriptor */
+static inline u16 get_unused_desc(struct virtqueue_split *vq)
 {
     u16 idx = vq->first_unused;
     ASSERT(vq->num_unused > 0);
@@ -49,7 +204,7 @@ static inline u16 get_unused_desc(struct virtqueue *vq)
 }
 
 /* Marks the descriptor chain starting at index idx as unused */
-static inline void put_unused_desc_chain(struct virtqueue *vq, u16 idx)
+static inline void put_unused_desc_chain(struct virtqueue_split *vq, u16 idx)
 {
     u16 start = idx;
 
@@ -67,8 +222,8 @@ static inline void put_unused_desc_chain(struct virtqueue *vq, u16 idx)
 }
 
 /* Adds a buffer to a virtqueue, returns 0 on success, negative number on error */
-int virtqueue_add_buf(
-    struct virtqueue *vq,    /* the queue */
+static int virtqueue_add_buf_split(
+    struct virtqueue *_vq,    /* the queue */
     struct scatterlist sg[], /* sg array of length out + in */
     unsigned int out,        /* number of driver->device buffer descriptors in sg */
     unsigned int in,         /* number of device->driver buffer descriptors in sg */
@@ -76,6 +231,7 @@ int virtqueue_add_buf(
     void *va_indirect,       /* VA of the indirect page or NULL */
     ULONGLONG phys_indirect) /* PA of the indirect page or 0 */
 {
+    struct virtqueue_split *vq = splitvq(_vq);
     struct vring *vring = &vq->vring;
     unsigned int i;
     u16 idx;
@@ -144,10 +300,11 @@ int virtqueue_add_buf(
 }
 
 /* Gets the opaque pointer associated with a returned buffer, or NULL if no buffer is available */
-void *virtqueue_get_buf(
-    struct virtqueue *vq, /* the queue */
+static void *virtqueue_get_buf_split(
+    struct virtqueue *_vq, /* the queue */
     unsigned int *len)    /* number of bytes returned by the device */
 {
+    struct virtqueue_split *vq = splitvq(_vq);
     void *opaque;
     u16 idx;
 
@@ -168,7 +325,7 @@ void *virtqueue_get_buf(
     put_unused_desc_chain(vq, idx);
 
     vq->last_used++;
-    if (vq->vdev->event_suppression_enabled && virtqueue_is_interrupt_enabled(vq)) {
+    if (_vq->vdev->event_suppression_enabled && virtqueue_is_interrupt_enabled(_vq)) {
         vring_used_event(&vq->vring) = vq->last_used;
         KeMemoryBarrier();
     }
@@ -178,14 +335,16 @@ void *virtqueue_get_buf(
 }
 
 /* Returns true if at least one returned buffer is available, false otherwise */
-BOOLEAN virtqueue_has_buf(struct virtqueue *vq)
+static BOOLEAN virtqueue_has_buf_split(struct virtqueue *_vq)
 {
+    struct virtqueue_split *vq = splitvq(_vq);
     return (vq->last_used != vq->vring.used->idx);
 }
 
 /* Returns true if the device should be notified, false otherwise */
-bool virtqueue_kick_prepare(struct virtqueue *vq)
+static bool virtqueue_kick_prepare_split(struct virtqueue *_vq)
 {
+    struct virtqueue_split *vq = splitvq(_vq);
     bool wrap_around;
     u16 old, new;
     KeMemoryBarrier();
@@ -196,7 +355,7 @@ bool virtqueue_kick_prepare(struct virtqueue *vq)
     new = vq->master_vring_avail.idx;
     vq->num_added_since_kick = 0;
 
-    if (vq->vdev->event_suppression_enabled) {
+    if (_vq->vdev->event_suppression_enabled) {
         return wrap_around || (bool)vring_need_event(vring_avail_event(&vq->vring), new, old);
     } else {
         return !(vq->vring.used->flags & VIRTQ_USED_F_NO_NOTIFY);
@@ -204,20 +363,22 @@ bool virtqueue_kick_prepare(struct virtqueue *vq)
 }
 
 /* Notifies the device even if it's not necessary according to the event suppression logic */
-void virtqueue_kick_always(struct virtqueue *vq)
+static void virtqueue_kick_always_split(struct virtqueue *_vq)
 {
+    struct virtqueue_split *vq = splitvq(_vq);
     KeMemoryBarrier();
     vq->num_added_since_kick = 0;
-    virtqueue_notify(vq);
+    virtqueue_notify(_vq);
 }
 
 /* Enables interrupts on a virtqueue and returns false if the queue has at least one returned
  * buffer available to be fetched by virtqueue_get_buf, true otherwise */
-bool virtqueue_enable_cb(struct virtqueue *vq)
+static bool virtqueue_enable_cb_split(struct virtqueue *_vq)
 {
-    if (!virtqueue_is_interrupt_enabled(vq)) {
+    struct virtqueue_split *vq = splitvq(_vq);
+    if (!virtqueue_is_interrupt_enabled(_vq)) {
         vq->master_vring_avail.flags &= ~VIRTQ_AVAIL_F_NO_INTERRUPT;
-        if (!vq->vdev->event_suppression_enabled)
+        if (!_vq->vdev->event_suppression_enabled)
         {
             vq->vring.avail->flags = vq->master_vring_avail.flags;
         }
@@ -230,13 +391,14 @@ bool virtqueue_enable_cb(struct virtqueue *vq)
 
 /* Enables interrupts on a virtqueue after ~3/4 of the currently pushed buffers have been
  * returned, returns false if this condition currently holds, false otherwise */
-bool virtqueue_enable_cb_delayed(struct virtqueue *vq)
+static bool virtqueue_enable_cb_delayed_split(struct virtqueue *_vq)
 {
+    struct virtqueue_split *vq = splitvq(_vq);
     u16 bufs;
 
-    if (!virtqueue_is_interrupt_enabled(vq)) {
+    if (!virtqueue_is_interrupt_enabled(_vq)) {
         vq->master_vring_avail.flags &= ~VIRTQ_AVAIL_F_NO_INTERRUPT;
-        if (!vq->vdev->event_suppression_enabled)
+        if (!_vq->vdev->event_suppression_enabled)
         {
             vq->vring.avail->flags = vq->master_vring_avail.flags;
         }
@@ -250,11 +412,12 @@ bool virtqueue_enable_cb_delayed(struct virtqueue *vq)
 }
 
 /* Disables interrupts on a virtqueue */
-void virtqueue_disable_cb(struct virtqueue *vq)
+static void virtqueue_disable_cb_split(struct virtqueue *_vq)
 {
-    if (virtqueue_is_interrupt_enabled(vq)) {
+    struct virtqueue_split *vq = splitvq(_vq);
+    if (virtqueue_is_interrupt_enabled(_vq)) {
         vq->master_vring_avail.flags |= VIRTQ_AVAIL_F_NO_INTERRUPT;
-        if (!vq->vdev->event_suppression_enabled)
+        if (!_vq->vdev->event_suppression_enabled)
         {
             vq->vring.avail->flags = vq->master_vring_avail.flags;
         }
@@ -262,68 +425,36 @@ void virtqueue_disable_cb(struct virtqueue *vq)
 }
 
 /* Returns true if interrupts are enabled on a virtqueue, false otherwise */
-BOOLEAN virtqueue_is_interrupt_enabled(struct virtqueue *vq)
+static BOOLEAN virtqueue_is_interrupt_enabled_split(struct virtqueue *_vq)
 {
+    struct virtqueue_split *vq = splitvq(_vq);
     return !(vq->master_vring_avail.flags & VIRTQ_AVAIL_F_NO_INTERRUPT);
 }
 
-/* Initializes a new virtqueue using already allocated memory */
-struct virtqueue *vring_new_virtqueue(
-    unsigned int index,                 /* virtqueue index */
-    unsigned int num,                   /* virtqueue size (always a power of 2) */
-    unsigned int vring_align,           /* vring alignment requirement */
-    VirtIODevice *vdev,                 /* the virtio device owning the queue */
-    void *pages,                        /* vring memory */
-    void (*notify)(struct virtqueue *), /* notification callback */
-    void *control)                      /* virtqueue memory */
-{
-    struct virtqueue *vq = (struct virtqueue *)control;
-    u16 i;
-
-    if (DESC_INDEX(num, num) != 0) {
-        DPrintf(0, "Virtqueue length %u is not a power of 2\n", num);
-        return NULL;
-    }
-
-    RtlZeroMemory(vq, sizeof(*vq) + num * sizeof(void *));
-
-    vring_init(&vq->vring, num, pages, vring_align);
-    vq->vdev = vdev;
-    vq->notification_cb = notify;
-    vq->index = index;
-
-    /* Build a linked list of unused descriptors */
-    vq->num_unused = num;
-    vq->first_unused = 0;
-    for (i = 0; i < num - 1; i++) {
-        vq->vring.desc[i].flags = VIRTQ_DESC_F_NEXT;
-        vq->vring.desc[i].next = i + 1;
-    }
-    return vq;
-}
-
 /* Re-initializes an already initialized virtqueue */
-void virtqueue_shutdown(struct virtqueue *vq)
+static void virtqueue_shutdown_split(struct virtqueue *_vq)
 {
+    struct virtqueue_split *vq = splitvq(_vq);
     unsigned int num = vq->vring.num;
     void *pages = vq->vring.desc;
-    unsigned int vring_align = vq->vdev->addr ? PAGE_SIZE : SMP_CACHE_BYTES;
+    unsigned int vring_align = _vq->vdev->addr ? PAGE_SIZE : SMP_CACHE_BYTES;
 
-    RtlZeroMemory(pages, vring_size(num, vring_align));
-    (void)vring_new_virtqueue(
-        vq->index,
+    RtlZeroMemory(pages, vring_size_split(num, vring_align));
+    (void)vring_new_virtqueue_split(
+        _vq->index,
         vq->vring.num,
         vring_align,
-        vq->vdev,
+        _vq->vdev,
         pages,
-        vq->notification_cb,
+        _vq->notification_cb,
         vq);
 }
 
 /* Gets the opaque pointer associated with a not-yet-returned buffer, or NULL if no buffer is available
  * to aid drivers with cleaning up all data on virtqueue shutdown */
-void *virtqueue_detach_unused_buf(struct virtqueue *vq)
+static void *virtqueue_detach_unused_buf_split(struct virtqueue *_vq)
 {
+    struct virtqueue_split *vq = splitvq(_vq);
     u16 idx;
     void *opaque = NULL;
 
@@ -338,11 +469,65 @@ void *virtqueue_detach_unused_buf(struct virtqueue *vq)
     return opaque;
 }
 
-/* Returns the base size of the virtqueue structure (add sizeof(void *) times the number
- * of elements to get the the full size) */
-unsigned int vring_control_block_size()
+/* Returns the size of the virtqueue structure including
+ * additional size for per-descriptor data */
+unsigned int vring_control_block_size(u16 qsize, bool packed)
 {
-    return sizeof(struct virtqueue);
+    unsigned int res;
+    if (packed) {
+        return vring_control_block_size_packed(qsize);
+    }
+    res = sizeof(struct virtqueue_split);
+    res += sizeof(void *) * qsize;
+    return res;
+}
+
+/* Initializes a new virtqueue using already allocated memory */
+struct virtqueue *vring_new_virtqueue_split(
+    unsigned int index,                 /* virtqueue index */
+    unsigned int num,                   /* virtqueue size (always a power of 2) */
+    unsigned int vring_align,           /* vring alignment requirement */
+    VirtIODevice *vdev,                 /* the virtio device owning the queue */
+    void *pages,                        /* vring memory */
+    void(*notify)(struct virtqueue *), /* notification callback */
+    void *control)                      /* virtqueue memory */
+{
+    struct virtqueue_split *vq = splitvq(control);
+    u16 i;
+
+    if (DESC_INDEX(num, num) != 0) {
+        DPrintf(0, "Virtqueue length %u is not a power of 2\n", num);
+        return NULL;
+    }
+
+    RtlZeroMemory(vq, sizeof(*vq) + num * sizeof(void *));
+
+    vring_init(&vq->vring, num, pages, vring_align);
+    vq->vq.vdev = vdev;
+    vq->vq.notification_cb = notify;
+    vq->vq.index = index;
+
+    /* Build a linked list of unused descriptors */
+    vq->num_unused = num;
+    vq->first_unused = 0;
+    for (i = 0; i < num - 1; i++) {
+        vq->vring.desc[i].flags = VIRTQ_DESC_F_NEXT;
+        vq->vring.desc[i].next = i + 1;
+    }
+    vq->vq.avail_va = vq->vring.avail;
+    vq->vq.used_va = vq->vring.used;
+    vq->vq.add_buf = virtqueue_add_buf_split;
+    vq->vq.detach_unused_buf = virtqueue_detach_unused_buf_split;
+    vq->vq.disable_cb = virtqueue_disable_cb_split;
+    vq->vq.enable_cb = virtqueue_enable_cb_split;
+    vq->vq.enable_cb_delayed = virtqueue_enable_cb_delayed_split;
+    vq->vq.get_buf = virtqueue_get_buf_split;
+    vq->vq.has_buf = virtqueue_has_buf_split;
+    vq->vq.is_interrupt_enabled = virtqueue_is_interrupt_enabled_split;
+    vq->vq.kick_always = virtqueue_kick_always_split;
+    vq->vq.kick_prepare = virtqueue_kick_prepare_split;
+    vq->vq.shutdown = virtqueue_shutdown_split;
+    return &vq->vq;
 }
 
 /* Negotiates virtio transport features */
@@ -365,4 +550,13 @@ void vring_transport_features(
 u32 virtio_get_indirect_page_capacity()
 {
     return PAGE_SIZE / sizeof(struct vring_desc);
+}
+
+unsigned long vring_size(unsigned int num, unsigned long align, bool packed)
+{
+    if (packed) {
+        return vring_size_packed(num, align);
+    } else {
+        return vring_size_split(num, align);
+    }
 }

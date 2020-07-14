@@ -82,6 +82,14 @@ BalloonDeviceAdd(
     WDF_OBJECT_ATTRIBUTES_INIT_CONTEXT_TYPE(&attributes, DEVICE_CONTEXT);
     attributes.EvtCleanupCallback = BalloonEvtDeviceContextCleanup;
 
+    /* The driver initializes all the queues under lock of
+     * WDF object of the device. If we use default execution
+     * level, this lock is spinlock and common blocks required
+     * for queues can't be allocated on DISPATCH. So, we change
+     * the execution level to PASSIVE -> the lock is fast mutex
+     */
+    attributes.ExecutionLevel = WdfExecutionLevelPassive;
+
 #ifdef USE_BALLOON_SERVICE
     attributes.SynchronizationScope = WdfSynchronizationScopeDevice;
 
@@ -156,35 +164,9 @@ BalloonDeviceAdd(
                       0
                       );
     devCtx->bListInitialized = TRUE;
-    devCtx->pfns_table = (PPFN_NUMBER)
-              ExAllocatePoolWithTag(
-                      NonPagedPool,
-                      PAGE_SIZE,
-                      BALLOON_MGMT_POOL_TAG
-                      );
+    devCtx->pfns_table = NULL;
+    devCtx->MemStats = NULL;
 
-    if(devCtx->pfns_table == NULL)
-    {
-        TraceEvents(TRACE_LEVEL_ERROR, DBG_PNP,"ExAllocatePoolWithTag failed\n");
-        status = STATUS_INSUFFICIENT_RESOURCES;
-        return status;
-    }
-
-    devCtx->MemStats = (PBALLOON_STAT)
-              ExAllocatePoolWithTag(
-                      NonPagedPool,
-                      sizeof (BALLOON_STAT) * VIRTIO_BALLOON_S_NR,
-                      BALLOON_MGMT_POOL_TAG
-                      );
-
-    if(devCtx->MemStats == NULL)
-    {
-        TraceEvents(TRACE_LEVEL_ERROR, DBG_PNP,"ExAllocatePoolWithTag failed\n");
-        status = STATUS_INSUFFICIENT_RESOURCES;
-        return status;
-    }
-
-    RtlFillMemory (devCtx->MemStats, sizeof (BALLOON_STAT) * VIRTIO_BALLOON_S_NR, -1);
 
     KeInitializeEvent(&devCtx->HostAckEvent,
                       SynchronizationEvent,
@@ -257,33 +239,7 @@ BalloonEvtDeviceContextCleanup(
         ExDeleteNPagedLookasideList(&devCtx->LookAsideList);
         devCtx->bListInitialized = FALSE;
     }
-    if(devCtx->pfns_table)
-    {
-        ExFreePoolWithTag(
-                   devCtx->pfns_table,
-                   BALLOON_MGMT_POOL_TAG
-                   );
-        devCtx->pfns_table = NULL;
-    }
 
-    if(devCtx->MemStats)
-    {
-
-#ifndef USE_BALLOON_SERVICE
-        RtlFillMemory(devCtx->MemStats,
-            sizeof(BALLOON_STAT) * VIRTIO_BALLOON_S_NR, -1);
-        if (devCtx->StatVirtQueue)
-        {
-            BalloonMemStats(Device);
-        }
-#endif // !USE_BALLOON_SERVICE
-
-        ExFreePoolWithTag(
-                   devCtx->MemStats,
-                   BALLOON_MGMT_POOL_TAG
-                   );
-        devCtx->MemStats = NULL;
-    }
     TraceEvents(TRACE_LEVEL_INFORMATION, DBG_INIT, "<-- %s\n", __FUNCTION__);
 }
 
@@ -314,6 +270,35 @@ BalloonEvtDevicePrepareHardware(
     if (!NT_SUCCESS(status))
     {
         TraceEvents(TRACE_LEVEL_ERROR, DBG_POWER, "VirtIOWdfInitialize failed with %x\n", status);
+        return status;
+    }
+
+    if (NT_SUCCESS(status))
+    {
+        devCtx->MemStats = (PBALLOON_STAT)VirtIOWdfDeviceAllocDmaMemory(&devCtx->VDevice.VIODevice, PAGE_SIZE, BALLOON_MGMT_POOL_TAG);
+    }
+
+    if (devCtx->MemStats)
+    {
+        RtlFillMemory(devCtx->MemStats, sizeof(BALLOON_STAT) * VIRTIO_BALLOON_S_NR, -1);
+    }
+    else
+    {
+        TraceEvents(TRACE_LEVEL_ERROR, DBG_POWER, "Failed to allocate MemStats block\n");
+        status = STATUS_INSUFFICIENT_RESOURCES;
+    }
+
+    /* use BALLOON_MGMT_POOL_TAG also for tagging common memory blocks */
+    if (NT_SUCCESS(status))
+    {
+        devCtx->pfns_table = (PPFN_NUMBER)VirtIOWdfDeviceAllocDmaMemory(&devCtx->VDevice.VIODevice, PAGE_SIZE, BALLOON_MGMT_POOL_TAG);
+    }
+
+    if (devCtx->pfns_table == NULL)
+    {
+        TraceEvents(TRACE_LEVEL_ERROR, DBG_PNP, "Failed to allocate PFNS_TABLE block\n");
+        status = STATUS_INSUFFICIENT_RESOURCES;
+        return status;
     }
 
     TraceEvents(TRACE_LEVEL_INFORMATION, DBG_PNP, "<-- %s\n", __FUNCTION__);
@@ -334,7 +319,15 @@ BalloonEvtDeviceReleaseHardware (
 
     PAGED_CODE();
 
+    WdfObjectAcquireLock(Device);
+
     devCtx = GetDeviceContext(Device);
+
+    VirtIOWdfDeviceFreeDmaMemoryByTag(&devCtx->VDevice.VIODevice, BALLOON_MGMT_POOL_TAG);
+    devCtx->MemStats = NULL;
+    devCtx->pfns_table = NULL;
+
+    WdfObjectReleaseLock(Device);
 
     VirtIOWdfShutdown(&devCtx->VDevice);
 
@@ -517,14 +510,18 @@ BalloonInterruptIsr(
 
     UNREFERENCED_PARAMETER( MessageID );
 
-    TraceEvents(TRACE_LEVEL_INFORMATION, DBG_INTERRUPT, "--> %s\n", __FUNCTION__);
     Device = WdfInterruptGetDevice(WdfInterrupt);
     devCtx = GetDeviceContext(Device);
 
     if (VirtIOWdfGetISRStatus(&devCtx->VDevice) > 0)
     {
+        TraceEvents(TRACE_LEVEL_INFORMATION, DBG_INTERRUPT, "--> %s\n", __FUNCTION__);
         WdfInterruptQueueDpcForIsr( WdfInterrupt );
         return TRUE;
+    }
+    else
+    {
+        TraceEvents(TRACE_LEVEL_INFORMATION, DBG_INTERRUPT, "--> %s No Isr indicated\n", __FUNCTION__);
     }
     return FALSE;
 }
@@ -629,6 +626,7 @@ BalloonInterruptEnable(
 
     devCtx = GetDeviceContext(WdfDevice);
     EnableInterrupt(WdfInterrupt, devCtx);
+    BalloonInterruptIsr(WdfInterrupt, 0);
 
     TraceEvents(TRACE_LEVEL_VERBOSE, DBG_PNP, "<-- %s\n", __FUNCTION__);
     return STATUS_SUCCESS;
@@ -666,10 +664,12 @@ BalloonEvtFileClose(
     // synchronize with the device to make sure it doesn't exit D0 from underneath us
     WdfObjectAcquireLock(Device);
 
-    RtlFillMemory(devCtx->MemStats,
-        sizeof(BALLOON_STAT) * VIRTIO_BALLOON_S_NR, -1);
+    if (devCtx->MemStats)
+    {
+        RtlFillMemory(devCtx->MemStats, sizeof(BALLOON_STAT) * VIRTIO_BALLOON_S_NR, -1);
+    }
 
-    if (devCtx->StatVirtQueue)
+    if (devCtx->StatVirtQueue && devCtx->MemStats)
     {
         BalloonMemStats(Device);
     }
