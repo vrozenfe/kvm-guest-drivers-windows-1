@@ -10,10 +10,10 @@ Enabling and customizing virtio build features
     <Feature_AlwaysDefaultVendor>false</Feature_AlwaysDefaultVendor>
     <Feature_UsingWDF>false</Feature_UsingWDF>
     <Feature_PackOne>true</Feature_PackOne>
+    <PackOne_DestinationPrefix>..\</PackOne_DestinationPrefix>
     <Feature_LegacyStampInf>true</Feature_LegacyStampInf>
     <Feature_AdjustInfLegacy>true</Feature_AdjustInfLegacy>
     <Feature_AdjustInf>true</Feature_AdjustInf>
-    <!-- $(SourceInfFile) is already defined in .vcxproj -->
     <SourceInfFile>viogpudo.inx</SourceInfFile>
     <CopyrightStrings>VioGpuDodCopyrightStrings</CopyrightStrings>
   </PropertyGroup>
