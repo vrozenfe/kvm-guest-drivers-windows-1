@@ -1,5 +1,8 @@
+;/*++
 ;
-; Copyright (c) 2016-2017, Red Hat Inc.
+;INX_COPYRIGHT_1
+;INX_COPYRIGHT_2
+;
 ; viogpudo.inf
 ;
 
@@ -8,7 +11,7 @@ Signature="$Windows NT$"
 Class=Display
 ClassGUID={4d36e968-e325-11ce-bfc1-08002be10318}
 Provider=%RHEL%
-DriverVer= 09/05/2016, 1.01.01.0001
+DriverVer= 09/05/2018, 1.01.01.0001
 CatalogFile=viogpudo.cat
 
 [DestinationDirs]
