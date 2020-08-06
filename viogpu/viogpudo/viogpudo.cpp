@@ -2507,6 +2507,7 @@ NTSTATUS VioGpuAdapter::VioGpuAdapterInit(DXGK_DISPLAY_INFORMATION* pDispInfo)
     }
 
     m_u64HostFeatures = virtio_get_features(&m_VioDev);
+    m_u64GuestFeatures = 0;
     do
     {
         struct virtqueue *vqs[2];
@@ -2515,7 +2516,9 @@ NTSTATUS VioGpuAdapter::VioGpuAdapterInit(DXGK_DISPLAY_INFORMATION* pDispInfo)
             status = STATUS_UNSUCCESSFUL;
             break;
         }
-
+#if (WINVER == 0x0A00)
+        AckFeature(VIRTIO_F_IOMMU_PLATFORM);
+#endif
         status = virtio_set_features(&m_VioDev, m_u64GuestFeatures);
         if (!NT_SUCCESS(status))
         {
@@ -2641,6 +2644,7 @@ NTSTATUS VioGpuAdapter::HWInit(PCM_RESOURCE_LIST pResList, DXGK_DISPLAY_INFORMAT
                 break;
             }
             m_u64HostFeatures = virtio_get_features(&m_VioDev);
+            m_u64GuestFeatures = 0;
         }
         else
         {
@@ -2657,7 +2661,11 @@ NTSTATUS VioGpuAdapter::HWInit(PCM_RESOURCE_LIST pResList, DXGK_DISPLAY_INFORMAT
             break;
         }
 
-        m_u64GuestFeatures = m_u64HostFeatures;
+//        m_u64GuestFeatures = m_u64HostFeatures;
+#if (WINVER == 0x0A00)
+        AckFeature(VIRTIO_F_IOMMU_PLATFORM);
+#endif
+
         status = virtio_set_features(&m_VioDev, m_u64GuestFeatures);
         if (!NT_SUCCESS(status))
         {
